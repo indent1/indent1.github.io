@@ -5,10 +5,10 @@ import time
 import akshare as ak
 import pandas as pd
 
+# ================= 核心1：抓取A股大涨股票（新浪/网易双引擎防拦截） =================
 def get_surge_stocks():
-    print("📈 正在抓取A股大涨股票...")
+    print("📈 正在潜入【新浪/网易】接口抓取A股数据 (绕过东财防火墙)...")
     
-    # 🌟 你的 110 只核心武器库（全量装载）
     pool_1 = "300308,300502,300394,002463,300476,601138,688012,002371,688072,600584,002156,688041,688256,688498,688630,300567,300456,603283,603893,000066,000034"
     pool_2 = "002409,300666,603650,688268,688300,300054,600330,000962,002130,688234,605589,600183,003031,301377,688378"
     pool_3 = "603773,300776,688716,603663,300905,688386,300174,688333,600363,688027,600580,688639,688065,001270,300045,002273,688496,600552,688150"
@@ -17,35 +17,56 @@ def get_surge_stocks():
     pool_6 = "600900,600938,601899,601225,601288,600941,600285,000423,600660,300821,000922,000629"
     
     all_codes_str = f"{pool_1},{pool_2},{pool_3},{pool_4},{pool_5},{pool_6}"
-    my_pool_list = [code.strip() for code in all_codes_str.split(",")]
+    my_pool_list =[code.strip() for code in all_codes_str.split(",")]
     
-    # 🌟 修复 Bug 的关键：预先给一个空箱子，并且加上“空箱子提前下班”的指令
     df = None 
     for attempt in range(3):
         try:
-            df = ak.stock_zh_a_spot_em()
-            break
+            # 🌟 优先使用新浪接口
+            df = ak.stock_zh_a_spot()
+            if df is not None and not df.empty:
+                print("✅ 成功连接新浪财经接口！")
+                break
         except Exception:
-            print(f"⚠️ 第 {attempt+1} 次获取A股数据失败，休息2秒重试...")
-            time.sleep(2)
+            try:
+                # 🌟 如果新浪被墙，秒切网易接口作为备胎
+                df = ak.stock_zh_a_spot_netease()
+                if df is not None and not df.empty:
+                    print("✅ 成功连接网易财经接口！")
+                    break
+            except Exception:
+                print(f"⚠️ 第 {attempt+1} 次双引擎均获取失败，休息2秒重试...")
+                time.sleep(2)
             
-    # 如果3次都失败了，就直接下班，绝不往下走！
     if df is None or df.empty:
-        print("❌ 网络拥堵，3次获取A股数据均失败。取消本次发文。")
+        print("❌ 网络彻底拥堵，新浪/网易均无法连通。取消本次发文。")
         return None
         
-    df['代码'] = df['代码'].astype(str).str.zfill(6)
-    my_df = df[df['代码'].isin(my_pool_list)]
-    surge_df = my_df[my_df['涨跌幅'] > 3.0] # 涨幅>3%的股票
-    
-    if surge_df.empty:
-        return None
-        
-    stock_list =[]
-    for index, row in surge_df.iterrows():
-        stock_list.append(f"【{row['名称']}】 (代码: {row['代码']}) 今日涨幅：{row['涨跌幅']}%")
-    return stock_list
+    try:
+        # 智能匹配列名（因为新浪和网易返回的列名可能叫 'symbol' 或 '代码'）
+        code_col =[col for col in df.columns if '代码' in col or 'symbol' in col.lower()][0]
+        name_col =[col for col in df.columns if '名称' in col or 'name' in col.lower()][0]
+        change_col =[col for col in df.columns if '涨跌幅' in col or 'percent' in col.lower()][0]
 
+        df[code_col] = df[code_col].astype(str).str.zfill(6)
+        my_df = df[df[code_col].isin(my_pool_list)]
+        
+        # 将涨跌幅转换为数字格式进行筛选
+        my_df[change_col] = pd.to_numeric(my_df[change_col], errors='coerce')
+        surge_df = my_df[my_df[change_col] > 3.0] # 涨幅>3%的股票
+        
+        if surge_df.empty:
+            return None
+            
+        stock_list =[]
+        for index, row in surge_df.iterrows():
+            stock_list.append(f"【{row[name_col]}】 (代码: {row[code_col]}) 今日涨幅：{row[change_col]}%")
+        return stock_list
+    except Exception as e:
+        print(f"❌ 数据清洗报错：{str(e)}")
+        return None
+
+# ================= 核心2：调用 DeepSeek 写研报 =================
 def ask_deepseek(stock_list):
     api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
@@ -71,7 +92,7 @@ def ask_deepseek(stock_list):
     except Exception as e:
         return f"❌ AI 分析失败：{str(e)}"
 
-# ================= 核心魔法：将AI内容写成博客文章 =================
+# ================= 核心3：自动将AI内容写成博客文章 =================
 def write_blog_post(ai_content):
     today_date = datetime.datetime.now().strftime('%Y-%m-%d')
     post_time = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S+08:00')
