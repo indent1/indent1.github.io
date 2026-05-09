@@ -43,24 +43,34 @@ def get_surge_stocks():
         return None
         
     try:
-        # 智能匹配列名（因为新浪和网易返回的列名可能叫 'symbol' 或 '代码'）
         code_col =[col for col in df.columns if '代码' in col or 'symbol' in col.lower()][0]
         name_col =[col for col in df.columns if '名称' in col or 'name' in col.lower()][0]
-        change_col =[col for col in df.columns if '涨跌幅' in col or 'percent' in col.lower()][0]
+        
+        # 涨跌幅列名在新浪接口可能叫 'changepercent'，网易叫 'PERCENT'
+        change_col =[col for col in df.columns if '涨跌幅' in col or 'percent' in col.lower() or '涨跌' in col][0]
 
-        df[code_col] = df[code_col].astype(str).str.zfill(6)
-        my_df = df[df[code_col].isin(my_pool_list)]
+        # 🌟 终极杀招：不管接口返回的股票代码带不带 sh/sz，用正则表达式强行只提取里面的 6 位数字！
+        df['纯数字代码'] = df[code_col].astype(str).str.extract(r'(\d{6})')
+        
+        # 用纯数字代码去匹配我们的 110 只股票池
+        my_df = df[df['纯数字代码'].isin(my_pool_list)]
+        
+        if my_df.empty:
+            print("⚠️ 数据清洗后发现股票池为空。可能接口数据格式大变。")
+            return None
         
         # 将涨跌幅转换为数字格式进行筛选
         my_df[change_col] = pd.to_numeric(my_df[change_col], errors='coerce')
-        surge_df = my_df[my_df[change_col] > 3.0] # 涨幅>3%的股票
+        
+        # ⚠️ 测试时，请把这里的 3.0 临时改成 -10.0
+        surge_df = my_df[my_df[change_col] > -10.0] 
         
         if surge_df.empty:
             return None
             
         stock_list =[]
         for index, row in surge_df.iterrows():
-            stock_list.append(f"【{row[name_col]}】 (代码: {row[code_col]}) 今日涨幅：{row[change_col]}%")
+            stock_list.append(f"【{row[name_col]}】 (代码: {row['纯数字代码']}) 涨幅：{row[change_col]}%")
         return stock_list
     except Exception as e:
         print(f"❌ 数据清洗报错：{str(e)}")
