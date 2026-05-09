@@ -9,14 +9,40 @@ import glob
 # ================= 辅助函数：智能识别股票前缀（用于调用K线图） =================
 def get_market_prefix(code):
     code_str = str(code)
-    # 6开头是沪市 (sh)，0和3开头是深市 (sz)，4和8开头是北交所 (bj)
     if code_str.startswith('6'):
         return f"sh{code_str}"
     elif code_str.startswith('0') or code_str.startswith('3'):
         return f"sz{code_str}"
     elif code_str.startswith('8') or code_str.startswith('4'):
         return f"bj{code_str}"
-    return f"sh{code_str}" # 默认保底
+    return f"sh{code_str}" 
+
+# ================= 🌟 核心升级：对接“一言” API，获取无限哲学盲盒 =================
+def get_random_philosophy():
+    # c=d代表文学，c=k代表哲学，c=i代表诗词。我们混合请求，保证极高逼格
+    url = "https://v1.hitokoto.cn/?c=k&c=d&c=i"
+    try:
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        
+        text = data.get('hitokoto', '投资的本质是对认知的变现。')
+        author = data.get('from_who', '')
+        source = data.get('from', '')
+        
+        # 智能拼接作者和出处
+        if author and source:
+            footer = f"**{author}** 《{source}》"
+        elif author:
+            footer = f"**{author}**"
+        elif source:
+            footer = f"《{source}》"
+        else:
+            footer = "**佚名**"
+            
+        return f"> 💡 **投资哲思**：*“{text}”* —— {footer}"
+    except Exception:
+        # 如果一言接口偶然卡顿，给一个保底名言，防止程序崩溃
+        return "> 💡 **投资哲思**：*“耐心是一切聪明才智的基础。”* —— **柏拉图**"
 
 # ================= 核心1：Python 获取真实底层数据 =================
 def get_surge_stocks():
@@ -52,9 +78,7 @@ def get_surge_stocks():
             col for col in df.columns
             if '涨跌幅' in col or '涨幅' in col or 'percent' in col.lower()
         ]
-        
         if not possible_change_cols:
-            print(f"❌ 找不到涨跌幅列，当前接口返回的列名为：{list(df.columns)}")
             return None
             
         change_col = possible_change_cols[0]
@@ -73,7 +97,6 @@ def get_surge_stocks():
         if surge_df.empty:
             return None
             
-        # 按真实的【涨跌幅百分比】降序排列，取前 10 只！
         surge_df = surge_df.sort_values(by=change_col, ascending=False).head(10)
             
         stock_data_list =[]
@@ -104,8 +127,7 @@ def ask_deepseek_single(stock_name):
     【🔥 近期资金逻辑】：(一段话，写它近期受益于什么宏观政策或产业链爆发)
     
     【🔍 核心驱动力解析】：
-    (用列表符号分点列出3条驱动它上涨的核心因素。每条因素必须包含一个小标题和简短的解释，例如：
-    - **汽车轻量化与智能化**：新能源汽车对塑料件需求增加...)
+    (用列表符号分点列出3条驱动它上涨的核心因素。每条因素必须包含一个小标题和简短的解释)
     
     必须大白话客观分析，拒绝任何主观吹捧和废话。
     """
@@ -136,13 +158,13 @@ def ask_deepseek_summary(stock_data_list):
         
     system_prompt = f"""
     你是一位顶级的A股策略分析师。
-    我会给你今天涨幅 TOP10 异动股票的【真实数据】。
+    我会给你今天涨幅 TOP5 异动股票的【真实数据】。
     
     【强制任务】：
     1. 生成一个 Markdown 格式的总结表格。表头必须为：| 股票 | 涨幅 | 核心驱动力 | 风险提示 |
     2. '股票'和'涨幅'这两列，【必须100%照抄】我提供给你的真实数据，绝对不准修改数字！
-    3. '核心驱动力'列：用极其精炼的几个字概括（如：AI算力上游、出海红利）。
-    4. '风险提示'列：一针见血指出隐患（如：估值过高、客户集中度高）。
+    3. '核心驱动力'列：用极其精炼的几个字概括。
+    4. '风险提示'列：一针见血指出隐患。
     5. 在表格的最后，写一段加粗的【一句话总结】，点评今天整体市场的主线方向。
     
     我提供的真实数据如下：
@@ -154,7 +176,7 @@ def ask_deepseek_summary(stock_data_list):
     data = {
         "model": "deepseek-v4-pro",
         "messages":[{"role": "system", "content": system_prompt}, {"role": "user", "content": "请输出总结表格和一句话总结，不要任何多余废话。"}],
-        "temperature": 0.5 
+        "temperature": 0.3 
     }
     
     print("🤖 正在生成文末总结表格...")
@@ -166,7 +188,7 @@ def ask_deepseek_summary(stock_data_list):
             time.sleep(2)
     return "❌ 总结表格生成失败。"
 
-# ================= 核心4：强制排版生成博客（含K线图） =================
+# ================= 核心4：强制排版生成博客 =================
 def write_blog_post(stock_data_list):
     today_date = datetime.datetime.now().strftime('%Y-%m-%d')
     post_time = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S+08:00')
@@ -196,22 +218,21 @@ draft: false
     for stock in stock_data_list:
         print(f"🤖 正在呼叫 AI 单独分析：{stock['name']} ...")
         
-        # 1. 打印股票标题和真实涨幅
         md_content += f"## 🏷️ 【{stock['name']}】({stock['code']}) 真实涨幅：<span style='color:red;'>**{stock['change']}%**</span>\n\n"
         
-        # 2. 插入 AI 的基本面分析
         ai_analysis = ask_deepseek_single(stock['name'])
         md_content += ai_analysis + "\n\n"
         
-        # 🌟 3. 绝杀：调用新浪接口，直接插入动态日K线图！
+        # 插入动态日K线图
         market_code = get_market_prefix(stock['code'])
-        # 新浪财经的日K线动态图片 URL
         chart_url = f"https://image.sinajs.cn/newchart/daily/n/{market_code}.gif"
-        
-        # 插入 Markdown 图片语法
         md_content += f"**📊 近期日 K 线走势图：**\n\n![{stock['name']} 日K线]({chart_url})\n\n"
         
-        # 加一条华丽的分割线
+        # 🌟 绝杀：从“一言”接口实时抽取无限名言盲盒！
+        print("💡 正在从云端抽取哲学名言...")
+        philosophy_quote = get_random_philosophy()
+        md_content += philosophy_quote + "\n\n"
+        
         md_content += "---\n\n"
         
     md_content += "## 📌 总结：今日领涨先锋的核心驱动力\n\n"
