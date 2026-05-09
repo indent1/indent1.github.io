@@ -33,10 +33,24 @@ def get_surge_stocks():
         return None
         
     try:
+        # 寻找代码和名称列
         code_col =[col for col in df.columns if '代码' in col or 'symbol' in col.lower()][0]
         name_col =[col for col in df.columns if '名称' in col or 'name' in col.lower()][0]
-        change_col =[col for col in df.columns if '涨跌幅' in col or 'percent' in col.lower() or '涨跌' in col][0]
+        
+        # 🌟 绝杀：采用老板亲自提供的极其严谨的涨跌幅精确匹配逻辑！
+        possible_change_cols =[
+            col for col in df.columns
+            if '涨跌幅' in col or '涨幅' in col or 'percent' in col.lower()
+        ]
+        
+        if not possible_change_cols:
+            print(f"❌ 找不到涨跌幅列，当前接口返回的列名为：{list(df.columns)}")
+            return None
+            
+        change_col = possible_change_cols[0]
+        print(f"🎯 成功锁定真实的百分比列：{change_col}")
 
+        # 提取6位纯数字代码并过滤池子
         df['纯数字代码'] = df[code_col].astype(str).str.extract(r'(\d{6})')
         my_df = df[df['纯数字代码'].isin(my_pool_list)].copy()
         
@@ -45,23 +59,22 @@ def get_surge_stocks():
 
         my_df[change_col] = pd.to_numeric(my_df[change_col], errors='coerce')
         
-        # 🌟 筛选涨跌幅大于 5.0 的股票
-        surge_df = my_df[my_df[change_col] > 5.0] 
+        # ⚠️ 注意这里：如果今天没票，测试时依然可以临时改成 > -10.0 出结果
+        surge_df = my_df[my_df[change_col] > -10.0] 
         
         if surge_df.empty:
             return None
             
-        # 🌟 核心修改：按涨跌幅降序排列，只取前 5 只（Top 5）！
+        # 🌟 按真实的【涨跌幅百分比】降序排列，取前 5 只！
         surge_df = surge_df.sort_values(by=change_col, ascending=False).head(10)
             
         stock_data_list =[]
         for index, row in surge_df.iterrows():
             change_val = round(float(row[change_col]), 2)
-            # 因为涨幅是正的，在前面强行加个 '+' 号，看起来更有感觉
             stock_data_list.append({
                 "name": row[name_col],
                 "code": row['纯数字代码'],
-                "change": f"+{change_val}"
+                "change": f"+{change_val}" if change_val > 0 else f"{change_val}"
             })
             
         return stock_data_list
@@ -85,9 +98,9 @@ def ask_deepseek_single(stock_name):
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     data = {
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-pro",
         "messages":[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"请分析：{stock_name}"}],
-        "temperature": 0.2
+        "temperature": 0.5
     }
     
     for i in range(3):
@@ -124,9 +137,9 @@ def ask_deepseek_summary(stock_data_list):
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     data = {
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-pro",
         "messages":[{"role": "system", "content": system_prompt}, {"role": "user", "content": "请输出总结表格和一句话总结，不要任何多余废话。"}],
-        "temperature": 0.2 
+        "temperature": 0.5 
     }
     
     print("🤖 正在生成文末总结表格...")
@@ -167,6 +180,7 @@ draft: false
 """
     for stock in stock_data_list:
         print(f"🤖 正在呼叫 AI 单独分析：{stock['name']} ...")
+        # Python 亲自写标题，使用绝对真实的 % 涨幅
         md_content += f"## 🏷️ 【{stock['name']}】({stock['code']}) 真实涨幅：<span style='color:red;'>**{stock['change']}%**</span>\n\n"
         ai_analysis = ask_deepseek_single(stock['name'])
         md_content += ai_analysis + "\n\n---\n\n"
@@ -187,4 +201,4 @@ if __name__ == "__main__":
     if stock_data_list:
         write_blog_post(stock_data_list)
     else:
-        print("今日无符合条件的股票（涨幅未达5%），停更。")
+        print("今日无符合条件的股票，停更。")
