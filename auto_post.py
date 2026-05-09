@@ -65,7 +65,7 @@ def get_surge_stocks():
         if surge_df.empty:
             return None
             
-        # 🌟 按真实的【涨跌幅百分比】降序排列，取前 5 只！
+        # 🌟 按真实的【涨跌幅百分比】降序排列，取前 10 只！
         surge_df = surge_df.sort_values(by=change_col, ascending=False).head(10)
             
         stock_data_list =[]
@@ -121,7 +121,7 @@ def ask_deepseek_summary(stock_data_list):
         
     system_prompt = f"""
     你是一位顶级的A股策略分析师。
-    我会给你今天涨幅 TOP5 异动股票的【真实数据】。
+    我会给你今天涨幅 TOP10 异动股票的【真实数据】。
     
     【强制任务】：
     1. 生成一个 Markdown 格式的总结表格。表头必须为：| 股票 | 涨幅 | 核心驱动力 | 风险提示 |
@@ -163,7 +163,7 @@ def write_blog_post(stock_data_list):
         os.remove(old_file)
 
     md_content = f"""---
-title: "🚀 【深度复盘】核心资产涨幅 TOP5 逻辑拆解 ({today_date})"
+title: "🚀 【深度复盘】核心资产涨幅 TOP10 逻辑拆解 ({today_date})"
 date: {post_time}
 categories:
     - 量化研报
@@ -172,7 +172,7 @@ tags:
 draft: false
 ---
 
-# 今日异动领涨 TOP 5
+# 今日异动领涨 TOP 10
 此报告由 **Python 抓取底层真实数据 + DeepSeek 深度逻辑分析** 组合生成。数据绝对真实，拒绝 AI 幻觉！
 
 ---
