@@ -6,6 +6,18 @@ import akshare as ak
 import pandas as pd
 import glob
 
+# ================= 辅助函数：智能识别股票前缀（用于调用K线图） =================
+def get_market_prefix(code):
+    code_str = str(code)
+    # 6开头是沪市 (sh)，0和3开头是深市 (sz)，4和8开头是北交所 (bj)
+    if code_str.startswith('6'):
+        return f"sh{code_str}"
+    elif code_str.startswith('0') or code_str.startswith('3'):
+        return f"sz{code_str}"
+    elif code_str.startswith('8') or code_str.startswith('4'):
+        return f"bj{code_str}"
+    return f"sh{code_str}" # 默认保底
+
 # ================= 核心1：Python 获取真实底层数据 =================
 def get_surge_stocks():
     print("📈 正在潜入【新浪/网易】接口抓取A股真实数据...")
@@ -33,11 +45,9 @@ def get_surge_stocks():
         return None
         
     try:
-        # 寻找代码和名称列
         code_col =[col for col in df.columns if '代码' in col or 'symbol' in col.lower()][0]
         name_col =[col for col in df.columns if '名称' in col or 'name' in col.lower()][0]
         
-        # 🌟 绝杀：采用老板亲自提供的极其严谨的涨跌幅精确匹配逻辑！
         possible_change_cols =[
             col for col in df.columns
             if '涨跌幅' in col or '涨幅' in col or 'percent' in col.lower()
@@ -48,9 +58,7 @@ def get_surge_stocks():
             return None
             
         change_col = possible_change_cols[0]
-        print(f"🎯 成功锁定真实的百分比列：{change_col}")
 
-        # 提取6位纯数字代码并过滤池子
         df['纯数字代码'] = df[code_col].astype(str).str.extract(r'(\d{6})')
         my_df = df[df['纯数字代码'].isin(my_pool_list)].copy()
         
@@ -65,7 +73,7 @@ def get_surge_stocks():
         if surge_df.empty:
             return None
             
-        # 🌟 按真实的【涨跌幅百分比】降序排列，取前 10 只！
+        # 按真实的【涨跌幅百分比】降序排列，取前 10 只！
         surge_df = surge_df.sort_values(by=change_col, ascending=False).head(10)
             
         stock_data_list =[]
@@ -89,10 +97,17 @@ def ask_deepseek_single(stock_name):
     
     system_prompt = """
     你是一位严谨的A股量化研究员。
-    请直接用两段话分析这只股票（绝对不准写标题，绝对不准写任何涨跌幅数字）：
-    第一段：【🏰 核心产业壁垒】：(主营业务、护城河)
-    第二段：【🔥 近期资金逻辑】：(受益于什么宏观政策或产业链爆发)
-    大白话，客观分析，拒绝任何吹捧。
+    请分析这只股票，必须严格按照以下三段格式输出（绝对不准写总标题，绝对不准捏造任何涨跌幅数字）：
+    
+    【🏰 核心产业壁垒】：(一段话，写它的主营业务、护城河和行业地位)
+    
+    【🔥 近期资金逻辑】：(一段话，写它近期受益于什么宏观政策或产业链爆发)
+    
+    【🔍 核心驱动力解析】：
+    (用列表符号分点列出3条驱动它上涨的核心因素。每条因素必须包含一个小标题和简短的解释，例如：
+    - **汽车轻量化与智能化**：新能源汽车对塑料件需求增加...)
+    
+    必须大白话客观分析，拒绝任何主观吹捧和废话。
     """
     
     url = "https://api.deepseek.com/v1/chat/completions"
@@ -151,7 +166,7 @@ def ask_deepseek_summary(stock_data_list):
             time.sleep(2)
     return "❌ 总结表格生成失败。"
 
-# ================= 核心4：强制排版生成博客 =================
+# ================= 核心4：强制排版生成博客（含K线图） =================
 def write_blog_post(stock_data_list):
     today_date = datetime.datetime.now().strftime('%Y-%m-%d')
     post_time = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S+08:00')
@@ -180,10 +195,24 @@ draft: false
 """
     for stock in stock_data_list:
         print(f"🤖 正在呼叫 AI 单独分析：{stock['name']} ...")
-        # Python 亲自写标题，使用绝对真实的 % 涨幅
+        
+        # 1. 打印股票标题和真实涨幅
         md_content += f"## 🏷️ 【{stock['name']}】({stock['code']}) 真实涨幅：<span style='color:red;'>**{stock['change']}%**</span>\n\n"
+        
+        # 2. 插入 AI 的基本面分析
         ai_analysis = ask_deepseek_single(stock['name'])
-        md_content += ai_analysis + "\n\n---\n\n"
+        md_content += ai_analysis + "\n\n"
+        
+        # 🌟 3. 绝杀：调用新浪接口，直接插入动态日K线图！
+        market_code = get_market_prefix(stock['code'])
+        # 新浪财经的日K线动态图片 URL
+        chart_url = f"https://image.sinajs.cn/newchart/daily/n/{market_code}.gif"
+        
+        # 插入 Markdown 图片语法
+        md_content += f"**📊 近期日 K 线走势图：**\n\n![{stock['name']} 日K线]({chart_url})\n\n"
+        
+        # 加一条华丽的分割线
+        md_content += "---\n\n"
         
     md_content += "## 📌 总结：今日领涨先锋的核心驱动力\n\n"
     summary_content = ask_deepseek_summary(stock_data_list)
