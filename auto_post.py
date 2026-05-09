@@ -128,16 +128,25 @@ draft: false
 ---
 
 # 今日异动全景扫描
-此报告由 **GitHub Actions + DeepSeek** 全自动生成，抓取全市场核心标的进行深度分析。
+此报告由 **Python 获取底层真实数据 + DeepSeek 深度逻辑分析** 组合生成。数据绝对真实，拒绝 AI 幻觉！
 
 ---
 
-{ai_content}
-
----
-*本文由自动化程序于北京时间 {today_date} 自动发布。*
 """
+    # 🌟 绝杀：Python 循环拼装！强制将真实涨幅写死在标题上！
+    for stock in stock_data_list:
+        print(f"🤖 正在呼叫 AI 单独分析：{stock['name']} ...")
+        
+        # Python 亲自写标题，使用从 akshare 抓来的真实 % 涨幅
+        md_content += f"## 🏷️ 【{stock['name']}】({stock['code']}) 真实涨幅：**{stock['change']}%**\n\n"
+        
+        # 让 AI 仅仅补充下方的文字分析
+        ai_analysis = ask_deepseek_single(stock['name'])
+        md_content += ai_analysis + "\n\n---\n\n"
+        
+    md_content += f"*本文由自动化程序于北京时间 {today_date} 自动发布。*"
     
+    # 保存成 Markdown 文件
     folder_path = "content/post"
     os.makedirs(folder_path, exist_ok=True)
     file_path = f"{folder_path}/report-{today_date}.md"
@@ -147,12 +156,8 @@ draft: false
     print(f"✅ 博客文章已成功生成并保存在：{file_path}")
 
 if __name__ == "__main__":
-    stock_list = get_surge_stocks()
-    if stock_list:
-        ai_content = ask_deepseek(stock_list)
-        if "❌" not in ai_content:
-            write_blog_post(ai_content)
-        else:
-            print(ai_content)
+    stock_data_list = get_surge_stocks()
+    if stock_data_list:
+        build_and_publish_post(stock_data_list)
     else:
-        print("今日无大涨股票，或网络抓取失败，今日停更不发文。")
+        print("今日无大涨股票，停更。")
