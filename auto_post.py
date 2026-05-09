@@ -6,7 +6,7 @@ import akshare as ak
 import pandas as pd
 import glob
 
-# ================= 核心1：Python 获取真实底层数据（新浪接口防封杀） =================
+# ================= 核心1：Python 获取真实底层数据 =================
 def get_surge_stocks():
     print("📈 正在潜入【新浪/网易】接口抓取A股真实数据...")
     
@@ -16,13 +16,13 @@ def get_surge_stocks():
     df = None 
     for attempt in range(3):
         try:
-            df = ak.stock_zh_a_spot() # 优先新浪
+            df = ak.stock_zh_a_spot() 
             if df is not None and not df.empty:
                 print("✅ 成功连接新浪财经接口！")
                 break
         except Exception:
             try:
-                df = ak.stock_zh_a_spot_netease() # 备用网易
+                df = ak.stock_zh_a_spot_netease() 
                 if df is not None and not df.empty:
                     print("✅ 成功连接网易财经接口！")
                     break
@@ -30,7 +30,6 @@ def get_surge_stocks():
                 time.sleep(2)
             
     if df is None or df.empty:
-        print("❌ 网络彻底拥堵，抓取失败")
         return None
         
     try:
@@ -46,29 +45,32 @@ def get_surge_stocks():
 
         my_df[change_col] = pd.to_numeric(my_df[change_col], errors='coerce')
         
-        # ⚠️ 注意这里！为了让你今天周六能测试出文章，我特意改成了 > -10.0！
-        # 等你看到网站上更新了真实数据，你再改回 > 3.0 ！
-        surge_df = my_df[my_df[change_col] > -10.0] 
+        # 🌟 筛选涨跌幅大于 5.0 的股票
+        surge_df = my_df[my_df[change_col] > 5.0] 
         
         if surge_df.empty:
             return None
             
+        # 🌟 核心修改：按涨跌幅降序排列，只取前 5 只（Top 5）！
+        surge_df = surge_df.sort_values(by=change_col, ascending=False).head(10)
+            
         stock_data_list =[]
         for index, row in surge_df.iterrows():
             change_val = round(float(row[change_col]), 2)
+            # 因为涨幅是正的，在前面强行加个 '+' 号，看起来更有感觉
             stock_data_list.append({
                 "name": row[name_col],
                 "code": row['纯数字代码'],
-                "change": change_val
+                "change": f"+{change_val}"
             })
             
-        return stock_data_list[:5] 
+        return stock_data_list
         
     except Exception as e:
         print(f"❌ 数据清洗报错：{str(e)}")
         return None
 
-# ================= 核心2：把 AI 当成没有感情的打字员 =================
+# ================= 核心2：单只股票分析引擎 =================
 def ask_deepseek_single(stock_name):
     api_key = os.environ.get("DEEPSEEK_API_KEY")
     
@@ -76,7 +78,7 @@ def ask_deepseek_single(stock_name):
     你是一位严谨的A股量化研究员。
     请直接用两段话分析这只股票（绝对不准写标题，绝对不准写任何涨跌幅数字）：
     第一段：【🏰 核心产业壁垒】：(主营业务、护城河)
-    第二段：【🔥 近期资金逻辑】：(受益于什么概念或产业链)
+    第二段：【🔥 近期资金逻辑】：(受益于什么宏观政策或产业链爆发)
     大白话，客观分析，拒绝任何吹捧。
     """
     
@@ -96,7 +98,47 @@ def ask_deepseek_single(stock_name):
             time.sleep(2)
     return "❌ AI分析生成失败。"
 
-# ================= 核心3：Python 暴力删除旧文并强制排版 =================
+# ================= 核心3：全局表格总结引擎 =================
+def ask_deepseek_summary(stock_data_list):
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    
+    real_data_str = ""
+    for s in stock_data_list:
+        real_data_str += f"股票：{s['name']}，真实涨幅：{s['change']}%\n"
+        
+    system_prompt = f"""
+    你是一位顶级的A股策略分析师。
+    我会给你今天涨幅 TOP5 异动股票的【真实数据】。
+    
+    【强制任务】：
+    1. 生成一个 Markdown 格式的总结表格。表头必须为：| 股票 | 涨幅 | 核心驱动力 | 风险提示 |
+    2. '股票'和'涨幅'这两列，【必须100%照抄】我提供给你的真实数据，绝对不准修改数字！
+    3. '核心驱动力'列：用极其精炼的几个字概括（如：AI算力上游、出海红利）。
+    4. '风险提示'列：一针见血指出隐患（如：估值过高、客户集中度高）。
+    5. 在表格的最后，写一段加粗的【一句话总结】，点评今天整体市场的主线方向。
+    
+    我提供的真实数据如下：
+    {real_data_str}
+    """
+    
+    url = "https://api.deepseek.com/v1/chat/completions"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    data = {
+        "model": "deepseek-chat",
+        "messages":[{"role": "system", "content": system_prompt}, {"role": "user", "content": "请输出总结表格和一句话总结，不要任何多余废话。"}],
+        "temperature": 0.2 
+    }
+    
+    print("🤖 正在生成文末总结表格...")
+    for i in range(3):
+        try:
+            response = requests.post(url, headers=headers, json=data, timeout=40)
+            return response.json()['choices'][0]['message']['content'].strip()
+        except Exception:
+            time.sleep(2)
+    return "❌ 总结表格生成失败。"
+
+# ================= 核心4：强制排版生成博客 =================
 def write_blog_post(stock_data_list):
     today_date = datetime.datetime.now().strftime('%Y-%m-%d')
     post_time = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S+08:00')
@@ -104,12 +146,11 @@ def write_blog_post(stock_data_list):
     folder_path = "content/post"
     os.makedirs(folder_path, exist_ok=True)
     
-    # 🌟 核心杀招：删掉以前所有发过的报告，保证你的网站首页只有最新的一篇，绝不看错！
     for old_file in glob.glob(os.path.join(folder_path, "report-*.md")):
         os.remove(old_file)
 
     md_content = f"""---
-title: "🚀 【深度复盘】核心资产大涨逻辑拆解 ({today_date})"
+title: "🚀 【深度复盘】核心资产涨幅 TOP5 逻辑拆解 ({today_date})"
 date: {post_time}
 categories:
     - 量化研报
@@ -118,20 +159,23 @@ tags:
 draft: false
 ---
 
-# 今日异动全景扫描
-此报告由 **Python 获取底层真实数据 + DeepSeek 深度逻辑分析** 组合生成。数据绝对真实，拒绝 AI 幻觉！
+# 今日异动领涨 TOP 5
+此报告由 **Python 抓取底层真实数据 + DeepSeek 深度逻辑分析** 组合生成。数据绝对真实，拒绝 AI 幻觉！
 
 ---
 
 """
     for stock in stock_data_list:
         print(f"🤖 正在呼叫 AI 单独分析：{stock['name']} ...")
-        # ⚠️ 认准这个带 🏷️ 符号的标题！这才是真代码生成的！
-        md_content += f"## 🏷️ 【{stock['name']}】({stock['code']}) 真实涨幅：**{stock['change']}%**\n\n"
+        md_content += f"## 🏷️ 【{stock['name']}】({stock['code']}) 真实涨幅：<span style='color:red;'>**{stock['change']}%**</span>\n\n"
         ai_analysis = ask_deepseek_single(stock['name'])
         md_content += ai_analysis + "\n\n---\n\n"
         
-    md_content += f"*本文由自动化程序于北京时间 {today_date} 自动发布。*"
+    md_content += "## 📌 总结：今日领涨先锋的核心驱动力\n\n"
+    summary_content = ask_deepseek_summary(stock_data_list)
+    md_content += summary_content + "\n\n"
+        
+    md_content += f"\n*本文由自动化程序于北京时间 {today_date} 自动发布。*"
     
     file_path = f"{folder_path}/report-{today_date}.md"
     with open(file_path, "w", encoding="utf-8") as f:
@@ -143,4 +187,4 @@ if __name__ == "__main__":
     if stock_data_list:
         write_blog_post(stock_data_list)
     else:
-        print("今日无符合条件的股票，停更。")
+        print("今日无符合条件的股票（涨幅未达5%），停更。")
