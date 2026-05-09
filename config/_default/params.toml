@@ -19,7 +19,7 @@ SortBy              = "default"
 
 [sidebar]
     emoji    = "🍥"
-    subtitle = "Lorem ipsum dolor sit amet, consectetur adipiscing elit."
+    subtitle = "每天下午15:30，准时为您发布全市场报告."
     avatar   = "img/avatar.png"
 
 [article]
