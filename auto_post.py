@@ -63,7 +63,7 @@ def get_surge_stocks():
         my_df[change_col] = pd.to_numeric(my_df[change_col], errors='coerce')
         
         # ⚠️ 测试时，请把这里的 3.0 临时改成 -10.0
-        surge_df = my_df[my_df[change_col] > -10.0] 
+        surge_df = my_df[my_df[change_col] > 5] 
         
         if surge_df.empty:
             return None
