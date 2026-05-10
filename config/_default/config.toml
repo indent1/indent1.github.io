@@ -17,7 +17,5 @@ disqusShortname = "hugo-theme-stack"
 [pagination]
     pagerSize = 5
 
-markup:
-  goldmark:
-    renderer:
-      unsafe: true
+[markup.goldmark.renderer]
+  unsafe = true
