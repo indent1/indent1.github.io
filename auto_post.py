@@ -5,10 +5,12 @@ import time
 import akshare as ak
 import pandas as pd
 import glob
+import random
 
-# ================= 辅助函数：智能识别股票前缀（用于调用K线图） =================
+# ================= 辅助函数：智能识别股票前缀（用于调用新浪实时图片） =================
 def get_market_prefix(code):
     code_str = str(code)
+    # 6开头是沪市，0和3开头是深市，4和8开头是北交所
     if code_str.startswith('6'):
         return f"sh{code_str}"
     elif code_str.startswith('0') or code_str.startswith('3'):
@@ -17,19 +19,19 @@ def get_market_prefix(code):
         return f"bj{code_str}"
     return f"sh{code_str}" 
 
-# ================= 🌟 核心升级：对接“一言” API，获取无限哲学盲盒 =================
+# ================= 辅助函数：对接“一言” API，获取无限哲学盲盒 =================
 def get_random_philosophy():
-    # c=d代表文学，c=k代表哲学，c=i代表诗词。我们混合请求，保证极高逼格
+    # c=d代表文学，c=k代表哲学，c=i代表诗词。混合请求保证逼格
     url = "https://v1.hitokoto.cn/?c=k&c=d&c=i"
     try:
         response = requests.get(url, timeout=5)
+        response.encoding = 'utf-8' 
         data = response.json()
         
         text = data.get('hitokoto', '投资的本质是对认知的变现。')
         author = data.get('from_who', '')
         source = data.get('from', '')
         
-        # 智能拼接作者和出处
         if author and source:
             footer = f"**{author}** 《{source}》"
         elif author:
@@ -41,13 +43,13 @@ def get_random_philosophy():
             
         return f"> 💡 **投资哲思**：*“{text}”* —— {footer}"
     except Exception:
-        # 如果一言接口偶然卡顿，给一个保底名言，防止程序崩溃
         return "> 💡 **投资哲思**：*“耐心是一切聪明才智的基础。”* —— **柏拉图**"
 
-# ================= 核心1：Python 获取真实底层数据 =================
+# ================= 核心1：Python 获取真实底层数据 (双核引擎防封杀) =================
 def get_surge_stocks():
     print("📈 正在潜入【新浪/网易】接口抓取A股真实数据...")
     
+    # 你的核心 110 只股票池
     pool_str = "300308,300502,300394,002463,300476,601138,688012,002371,688072,600584,002156,688041,688256,688498,688630,300567,300456,603283,603893,000066,000034,002409,300666,603650,688268,688300,300054,600330,000962,002130,688234,605589,600183,003031,301377,688378,603773,300776,688716,603663,300905,688386,300174,688333,600363,688027,600580,688639,688065,001270,300045,002273,688496,600552,688150,301393,688076,000963,002422,300298,300430,300487,002385,301162,000821,688700,688102,600549,300339,300207,300285,688116,300133,603662,002353,600066,601058,300866,688169,688036,601689,002126,603298,603338,000157,300833,600933,603997,600309,002601,300396,603259,300529,002372,300415,603179,002028,603556,603129,002444,603596,603197,601100,002472,688187,600900,600938,601899,601225,601288,600941,600285,000423,600660,300821,000922,000629"
     my_pool_list =[code.strip() for code in pool_str.split(",")]
     
@@ -91,12 +93,14 @@ def get_surge_stocks():
 
         my_df[change_col] = pd.to_numeric(my_df[change_col], errors='coerce')
         
-        # ⚠️ 注意这里：如果今天没票，测试时依然可以临时改成 > -10.0 出结果
+        # ⚠️ 注意：测试跑通后，一定要改回 > 3.0 或 > 5.0！
+        # 这里临时设为 > -10.0 是为了保证你在周末测试时绝对能抓到足够 10 只股票！
         surge_df = my_df[my_df[change_col] > -10.0] 
         
         if surge_df.empty:
             return None
             
+        # 🌟 核心修改：按涨跌幅降序排列，取前 10 只（TOP 10）！
         surge_df = surge_df.sort_values(by=change_col, ascending=False).head(10)
             
         stock_data_list =[]
@@ -114,7 +118,7 @@ def get_surge_stocks():
         print(f"❌ 数据清洗报错：{str(e)}")
         return None
 
-# ================= 核心2：单只股票分析引擎 =================
+# ================= 核心2：单只股票深度分析引擎 =================
 def ask_deepseek_single(stock_name):
     api_key = os.environ.get("DEEPSEEK_API_KEY")
     
@@ -142,13 +146,13 @@ def ask_deepseek_single(stock_name):
     
     for i in range(3):
         try:
-            response = requests.post(url, headers=headers, json=data, timeout=30)
+            response = requests.post(url, headers=headers, json=data, timeout=40)
             return response.json()['choices'][0]['message']['content'].strip()
         except Exception:
             time.sleep(2)
     return "❌ AI分析生成失败。"
 
-# ================= 核心3：全局表格总结引擎 =================
+# ================= 核心3：全局 TOP10 表格总结引擎 =================
 def ask_deepseek_summary(stock_data_list):
     api_key = os.environ.get("DEEPSEEK_API_KEY")
     
@@ -158,7 +162,7 @@ def ask_deepseek_summary(stock_data_list):
         
     system_prompt = f"""
     你是一位顶级的A股策略分析师。
-    我会给你今天涨幅 TOP5 异动股票的【真实数据】。
+    我会给你今天涨幅 TOP10 异动股票的【真实数据】。
     
     【强制任务】：
     1. 生成一个 Markdown 格式的总结表格。表头必须为：| 股票 | 涨幅 | 核心驱动力 | 风险提示 |
@@ -179,16 +183,16 @@ def ask_deepseek_summary(stock_data_list):
         "temperature": 0.3 
     }
     
-    print("🤖 正在生成文末总结表格...")
+    print("🤖 正在生成文末 TOP10 总结表格...")
     for i in range(3):
         try:
-            response = requests.post(url, headers=headers, json=data, timeout=40)
+            response = requests.post(url, headers=headers, json=data, timeout=60)
             return response.json()['choices'][0]['message']['content'].strip()
         except Exception:
             time.sleep(2)
     return "❌ 总结表格生成失败。"
 
-# ================= 核心4：强制排版生成博客 =================
+# ================= 核心4：强制大屏排版生成博客 =================
 def write_blog_post(stock_data_list):
     today_date = datetime.datetime.now().strftime('%Y-%m-%d')
     post_time = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S+08:00')
@@ -199,6 +203,7 @@ def write_blog_post(stock_data_list):
     for old_file in glob.glob(os.path.join(folder_path, "report-*.md")):
         os.remove(old_file)
 
+    # 标题自动带上 TOP10
     md_content = f"""---
 title: "🚀 【深度复盘】核心资产涨幅 TOP10 逻辑拆解 ({today_date})"
 date: {post_time}
@@ -223,19 +228,29 @@ draft: false
         ai_analysis = ask_deepseek_single(stock['name'])
         md_content += ai_analysis + "\n\n"
         
-        # 插入动态日K线图
+        # 🌟 获取新浪分时图和K线图，使用 Flexbox 实现大屏极致无边框并排排版
         market_code = get_market_prefix(stock['code'])
-        chart_url = f"https://image.sinajs.cn/newchart/daily/n/{market_code}.gif"
-        md_content += f"**📊 近期日 K 线走势图：**\n\n![{stock['name']} 日K线]({chart_url})\n\n"
+        min_chart_url = f"https://image.sinajs.cn/newchart/min/n/{market_code}.gif"
+        daily_chart_url = f"https://image.sinajs.cn/newchart/daily/n/{market_code}.gif"
         
-        # 🌟 绝杀：从“一言”接口实时抽取无限名言盲盒！
+        md_content += f"**📊 行情走势图（左：今日分时，右：近期日K）：**\n\n"
+        md_content += f"""<div style="display: flex; justify-content: space-between; gap: 20px; margin-bottom: 20px;">
+  <div style="flex: 1; text-align: center;">
+    <img src="{min_chart_url}" alt="分时图" style="width: 100%; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+  </div>
+  <div style="flex: 1; text-align: center;">
+    <img src="{daily_chart_url}" alt="日K线" style="width: 100%; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+  </div>
+</div>\n\n"""
+        
+        # 插入云端哲学名言盲盒
         print("💡 正在从云端抽取哲学名言...")
         philosophy_quote = get_random_philosophy()
         md_content += philosophy_quote + "\n\n"
         
         md_content += "---\n\n"
         
-    md_content += "## 📌 总结：今日领涨先锋的核心驱动力\n\n"
+    md_content += "## 📌 总结：今日 TOP10 领涨先锋的核心驱动力\n\n"
     summary_content = ask_deepseek_summary(stock_data_list)
     md_content += summary_content + "\n\n"
         
