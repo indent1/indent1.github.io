@@ -1,10 +1,6 @@
 name: 发布博客
 
 on:
-  push:
-    branches:
-      - master
-      - main
   workflow_dispatch:
   schedule:
     # 🌟 核心魔法：发文机器人是 15:30 运行。
