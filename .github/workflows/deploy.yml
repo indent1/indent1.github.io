@@ -5,6 +5,10 @@ on:
       - main
       - master
   workflow_dispatch:
+  workflow_run:                 # 🌟 新增魔法：跨部门监听
+    workflows: ["发布博客"]      # 🌟 盯紧隔壁那个名叫“发布博客”的机器人
+    types:
+      - completed               # 🌟 只要它干完活（completed），立马自动启动！
 permissions:
   contents: read
   pages: write
