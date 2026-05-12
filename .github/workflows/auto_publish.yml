@@ -42,7 +42,7 @@ jobs:
         
         # 把刚才生成的文章添加到仓库
         git add content/post/*
-        
+        git add .
         # 提交并推送到你的仓库
         # 加上 || echo "No changes to commit" 是防止今天没写文章导致报错
         git commit -m "🤖 AI 自动发布今日量化复盘报告" || echo "No changes to commit"
