@@ -198,8 +198,7 @@ def write_blog_post(stock_data_list):
     folder_path = "content/post"
     os.makedirs(folder_path, exist_ok=True)
     
-    for old_file in glob.glob(os.path.join(folder_path, "report-*.md")):
-        os.remove(old_file)
+
 
     # 标题自动带上 TOP10
     md_content = f"""---
