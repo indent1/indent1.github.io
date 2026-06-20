@@ -2,7 +2,6 @@ import os
 import glob
 import json
 import time
-import math
 import random
 import hashlib
 import datetime
@@ -22,38 +21,41 @@ BREAKOUT_MODE = "ALL_TIME_HIGH"
 
 
 # ================= 参数区 =================
-RED_WINDOW_LONG = 10
-RED_DAYS_LONG = 8
-
-RED_WINDOW_SHORT = 7
-RED_DAYS_SHORT = 6
-
 TOP_N = 25
-
 MAX_WORKERS = 6
 
 POST_FOLDER = "content/post"
-
 CACHE_FOLDER = "stock_cache"
 
-# GitHub 单文件限制 100MB，这里保守控制在 90MB 以内
-CACHE_SHARD_MAX_BYTES = int(os.environ.get("CACHE_SHARD_MAX_BYTES", str(90 * 1024 * 1024)))
+# 新缓存思路：
+# 1. 历史新高模式不再长期保存全量历史K线。
+# 2. 只保存每只股票的“历史最高收盘价状态” + 最近一段K线尾巴。
+# 3. 第二次运行时只读很小的状态文件，再用当天实时行情更新。
+RECENT_TAIL_ROWS_ALL_TIME = int(os.environ.get("RECENT_TAIL_ROWS_ALL_TIME", "320"))
+RECENT_TAIL_ROWS_ONE_YEAR = int(os.environ.get("RECENT_TAIL_ROWS_ONE_YEAR", "360"))
 
 if BREAKOUT_MODE == "ALL_TIME_HIGH":
     REPORT_PREFIX = "alltimehigh"
 
-    CACHE_BASENAME = "sina_all_time_high_ohlc_cache"
-    CACHE_FILE = os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}.csv.gz")
-    CACHE_LEGACY_FILE = os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}.csv")
-    CACHE_SHARD_PATTERN = os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}_part_*.csv.gz")
+    HIGH_WATERMARK_FILE = os.path.join(CACHE_FOLDER, "sina_all_time_high_watermark.csv.gz")
+    RECENT_CACHE_FILE = os.path.join(CACHE_FOLDER, "sina_all_time_high_recent_ohlc_tail.csv.gz")
+
+    # 旧版大缓存文件，启动时会自动清理，避免再次触发 GitHub 100MB 限制
+    LEGACY_CACHE_FILES = [
+        os.path.join(CACHE_FOLDER, "sina_all_time_high_ohlc_cache.csv"),
+        os.path.join(CACHE_FOLDER, "sina_all_time_high_ohlc_cache.csv.gz"),
+    ]
+    LEGACY_CACHE_PATTERNS = [
+        os.path.join(CACHE_FOLDER, "sina_all_time_high_ohlc_cache_part_*.csv.gz"),
+        os.path.join(CACHE_FOLDER, "sina_all_time_high_ohlc_cache*.tmp"),
+    ]
 
     AI_CACHE_FILE = os.path.join(CACHE_FOLDER, "deepseek_all_time_high_stock_brief_cache.json")
-    AI_CACHE_VERSION = "all_time_high_stock_brief_v1"
+    AI_CACHE_VERSION = "all_time_high_stock_brief_v2_watermark"
 
-    # 历史新高需要尽量多的历史数据，第一次跑会比较慢
     HIST_START_DATE_OVERRIDE = "19900101"
     HIST_CALENDAR_DAYS = 15000
-    CACHE_KEEP_ROWS = 9000
+    RECENT_TAIL_ROWS = RECENT_TAIL_ROWS_ALL_TIME
 
     BREAKOUT_TITLE = "历史新高突破"
     BREAKOUT_DESC = "最新收盘价突破该股上市以来历史收盘高点"
@@ -61,18 +63,24 @@ if BREAKOUT_MODE == "ALL_TIME_HIGH":
 else:
     REPORT_PREFIX = "oneyearhigh"
 
-    CACHE_BASENAME = "sina_one_year_high_ohlc_cache"
-    CACHE_FILE = os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}.csv.gz")
-    CACHE_LEGACY_FILE = os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}.csv")
-    CACHE_SHARD_PATTERN = os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}_part_*.csv.gz")
+    HIGH_WATERMARK_FILE = os.path.join(CACHE_FOLDER, "sina_one_year_high_watermark.csv.gz")
+    RECENT_CACHE_FILE = os.path.join(CACHE_FOLDER, "sina_one_year_high_recent_ohlc_tail.csv.gz")
+
+    LEGACY_CACHE_FILES = [
+        os.path.join(CACHE_FOLDER, "sina_one_year_high_ohlc_cache.csv"),
+        os.path.join(CACHE_FOLDER, "sina_one_year_high_ohlc_cache.csv.gz"),
+    ]
+    LEGACY_CACHE_PATTERNS = [
+        os.path.join(CACHE_FOLDER, "sina_one_year_high_ohlc_cache_part_*.csv.gz"),
+        os.path.join(CACHE_FOLDER, "sina_one_year_high_ohlc_cache*.tmp"),
+    ]
 
     AI_CACHE_FILE = os.path.join(CACHE_FOLDER, "deepseek_one_year_high_stock_brief_cache.json")
-    AI_CACHE_VERSION = "one_year_high_stock_brief_v1"
+    AI_CACHE_VERSION = "one_year_high_stock_brief_v2_tail"
 
-    # 一年以内前期新高，覆盖一年多一点，避免节假日和停牌影响
     HIST_START_DATE_OVERRIDE = None
     HIST_CALENDAR_DAYS = 460
-    CACHE_KEEP_ROWS = 360
+    RECENT_TAIL_ROWS = RECENT_TAIL_ROWS_ONE_YEAR
 
     BREAKOUT_TITLE = "一年内前期新高突破"
     BREAKOUT_DESC = "最新收盘价突破最近一年以内的前期收盘高点"
@@ -83,7 +91,7 @@ DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 DEEPSEEK_API_BASE = os.environ.get("DEEPSEEK_API_BASE", "https://api.deepseek.com")
 DEEPSEEK_THINKING = os.environ.get("DEEPSEEK_THINKING", "disabled").strip().lower()
 
-AI_CACHE_FOLDER = "stock_cache"
+AI_CACHE_FOLDER = CACHE_FOLDER
 AI_CACHE_KEEP_DAYS = 180
 
 
@@ -91,11 +99,11 @@ AI_CACHE_KEEP_DAYS = 180
 if BREAKOUT_MODE == "ALL_TIME_HIGH":
     NEW_HIGH_MIN_DAYS = 180
     NEW_HIGH_LOOKBACK = None
-    MIN_CACHE_MEDIAN_ROWS = 180
+    MIN_RECENT_MEDIAN_ROWS = 80
 else:
     NEW_HIGH_MIN_DAYS = 80
     NEW_HIGH_LOOKBACK = 250
-    MIN_CACHE_MEDIAN_ROWS = 120
+    MIN_RECENT_MEDIAN_ROWS = 120
 
 # 排除最近几天，避免刚突破后的价格污染“前高”
 EXCLUDE_RECENT_DAYS = 3
@@ -127,9 +135,7 @@ FALLBACK_NEW_HIGH_SCORE = 32.0
 
 # ================= 工具函数 =================
 def cn_now():
-    """
-    返回北京时间，保持 naive datetime，避免和旧缓存时间比较时报错。
-    """
+    """返回北京时间，保持 naive datetime，避免和旧缓存时间比较时报错。"""
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(hours=8)
 
 
@@ -264,21 +270,6 @@ def find_column(columns, keywords):
     return None
 
 
-def format_bytes(size):
-    try:
-        size = float(size)
-    except Exception:
-        return "0 B"
-
-    units = ["B", "KB", "MB", "GB"]
-    for unit in units:
-        if size < 1024:
-            return f"{size:.2f} {unit}"
-        size /= 1024
-
-    return f"{size:.2f} TB"
-
-
 def safe_remove(path):
     try:
         if path and os.path.exists(path):
@@ -288,18 +279,29 @@ def safe_remove(path):
         print(f"⚠️ 删除文件失败：{path}，原因：{str(e)}")
 
 
-def cleanup_old_cache_files():
-    """
-    清理旧版未压缩大 CSV，避免 GitHub Actions 再次把超过 100MB 的文件提交上去。
-    """
-    safe_remove(CACHE_LEGACY_FILE)
+def format_bytes(size):
+    try:
+        size = float(size)
+    except Exception:
+        return "0 B"
 
-    tmp_patterns = [
-        os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}.csv.gz.tmp"),
-        os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}_part_*.tmp"),
-    ]
+    units = ["B", "KB", "MB", "GB", "TB"]
+    for unit in units:
+        if size < 1024:
+            return f"{size:.2f} {unit}"
+        size /= 1024
 
-    for pattern in tmp_patterns:
+    return f"{size:.2f} PB"
+
+
+def cleanup_legacy_cache_files():
+    """清理旧版全量OHLC缓存，避免 GitHub 单文件 100MB 限制。"""
+    os.makedirs(CACHE_FOLDER, exist_ok=True)
+
+    for path in LEGACY_CACHE_FILES:
+        safe_remove(path)
+
+    for pattern in LEGACY_CACHE_PATTERNS:
         for path in glob.glob(pattern):
             safe_remove(path)
 
@@ -418,274 +420,437 @@ def get_all_a_stock_spot_sina():
     return None
 
 
-# ================= 行情缓存读写 =================
-def empty_cache_df():
+# ================= 新版轻量缓存：高水位 + 最近K线尾巴 =================
+def empty_recent_df():
     return pd.DataFrame(columns=["symbol", "code", "name", "date", "open", "close"])
 
 
-def normalize_cache_df(cache_df):
-    if cache_df is None or cache_df.empty:
-        return empty_cache_df()
+def empty_watermark_df():
+    return pd.DataFrame(columns=[
+        "symbol", "code", "name",
+        "high_close", "high_date", "high_trade_no",
+        "safe_rows_count", "processed_until_date", "updated_at"
+    ])
+
+
+def normalize_recent_df(df):
+    if df is None or df.empty:
+        return empty_recent_df()
 
     required_cols = ["symbol", "code", "name", "date", "open", "close"]
     for col in required_cols:
-        if col not in cache_df.columns:
-            print(f"⚠️ 缓存缺少字段 {col}。")
-            return empty_cache_df()
+        if col not in df.columns:
+            print(f"⚠️ 最近K线缓存缺少字段 {col}。")
+            return empty_recent_df()
 
-    cache_df = cache_df[required_cols].copy()
+    df = df[required_cols].copy()
+    df["symbol"] = df["symbol"].astype(str)
+    df["code"] = df["code"].apply(clean_stock_code)
+    df["name"] = df["name"].astype(str)
+    df["date"] = df["date"].apply(normalize_date)
+    df["open"] = pd.to_numeric(df["open"], errors="coerce")
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
 
-    cache_df["symbol"] = cache_df["symbol"].astype(str)
-    cache_df["code"] = cache_df["code"].apply(clean_stock_code)
-    cache_df["name"] = cache_df["name"].astype(str)
-    cache_df["date"] = cache_df["date"].astype(str)
-    cache_df["open"] = pd.to_numeric(cache_df["open"], errors="coerce")
-    cache_df["close"] = pd.to_numeric(cache_df["close"], errors="coerce")
+    df = df.dropna(subset=["symbol", "code", "name", "date", "open", "close"])
+    df = df[(df["open"] > 0) & (df["close"] > 0)].copy()
+    df = df.drop_duplicates(subset=["symbol", "date"], keep="last")
+    df = df.sort_values(["symbol", "date"])
+    df = df.groupby("symbol", group_keys=False).tail(RECENT_TAIL_ROWS)
+    df = df.reset_index(drop=True)
 
-    cache_df = cache_df.dropna(subset=["symbol", "code", "name", "date", "open", "close"])
-    cache_df = cache_df[(cache_df["open"] > 0) & (cache_df["close"] > 0)].copy()
-    cache_df = cache_df.drop_duplicates(subset=["symbol", "date"], keep="last")
-    cache_df = cache_df.sort_values(["symbol", "date"])
-
-    return cache_df
+    return df
 
 
-def read_cache_csv(path):
+def normalize_watermark_df(df):
+    if df is None or df.empty:
+        return empty_watermark_df()
+
+    required_cols = [
+        "symbol", "code", "name",
+        "high_close", "high_date", "high_trade_no",
+        "safe_rows_count", "processed_until_date", "updated_at"
+    ]
+
+    for col in required_cols:
+        if col not in df.columns:
+            print(f"⚠️ 高水位缓存缺少字段 {col}。")
+            return empty_watermark_df()
+
+    df = df[required_cols].copy()
+    df["symbol"] = df["symbol"].astype(str)
+    df["code"] = df["code"].apply(clean_stock_code)
+    df["name"] = df["name"].astype(str)
+    df["high_close"] = pd.to_numeric(df["high_close"], errors="coerce")
+    df["high_date"] = df["high_date"].apply(normalize_date)
+    df["high_trade_no"] = pd.to_numeric(df["high_trade_no"], errors="coerce").fillna(0).astype(int)
+    df["safe_rows_count"] = pd.to_numeric(df["safe_rows_count"], errors="coerce").fillna(0).astype(int)
+    df["processed_until_date"] = df["processed_until_date"].apply(normalize_date)
+    df["updated_at"] = df["updated_at"].astype(str)
+
+    df = df.dropna(subset=["symbol", "code", "name", "high_close", "high_date", "processed_until_date"])
+    df = df[df["high_close"] > 0].copy()
+    df = df.drop_duplicates(subset=["symbol"], keep="last")
+    df = df.sort_values("symbol").reset_index(drop=True)
+
+    return df
+
+
+def load_recent_cache():
+    if not os.path.exists(RECENT_CACHE_FILE):
+        print("🧊 未发现最近K线尾巴缓存。")
+        return empty_recent_df()
+
     try:
-        compression = "gzip" if str(path).endswith(".gz") else None
-        df = pd.read_csv(path, dtype={"symbol": str, "code": str}, compression=compression)
-        df = normalize_cache_df(df)
-        print(f"🧊 已读取缓存文件：{path}，{len(df)} 行，文件大小 {format_bytes(os.path.getsize(path))}。")
+        df = pd.read_csv(RECENT_CACHE_FILE, dtype={"symbol": str, "code": str}, compression="gzip")
+        df = normalize_recent_df(df)
+        print(
+            f"🧊 已加载最近K线尾巴缓存：{RECENT_CACHE_FILE}，"
+            f"{len(df)} 行，大小 {format_bytes(os.path.getsize(RECENT_CACHE_FILE))}。"
+        )
         return df
     except Exception as e:
-        print(f"⚠️ 缓存读取失败：{path}，原因：{str(e)}")
-        return empty_cache_df()
+        print(f"⚠️ 最近K线尾巴缓存读取失败，将重建：{str(e)}")
+        return empty_recent_df()
 
 
-def load_cache():
-    os.makedirs(CACHE_FOLDER, exist_ok=True)
-    cleanup_old_cache_files()
+def load_watermark_cache():
+    if not os.path.exists(HIGH_WATERMARK_FILE):
+        print("🧊 未发现历史高水位缓存。")
+        return empty_watermark_df()
 
-    shard_files = sorted(glob.glob(CACHE_SHARD_PATTERN))
-
-    if shard_files:
-        print(f"🧊 发现分片缓存：{len(shard_files)} 个。")
-        frames = []
-
-        for path in shard_files:
-            df = read_cache_csv(path)
-            if df is not None and not df.empty:
-                frames.append(df)
-
-        if not frames:
-            print("⚠️ 分片缓存均为空，需要重建缓存。")
-            return empty_cache_df()
-
-        cache_df = pd.concat(frames, ignore_index=True)
-        cache_df = normalize_cache_df(cache_df)
-
-        print(f"🧊 已加载分片历史缓存：{len(cache_df)} 行。")
-        return cache_df
-
-    if os.path.exists(CACHE_FILE):
-        cache_df = read_cache_csv(CACHE_FILE)
-        if not cache_df.empty:
-            print(f"🧊 已加载压缩历史缓存：{len(cache_df)} 行。")
-            return cache_df
-
-    if os.path.exists(CACHE_LEGACY_FILE):
-        print("⚠️ 发现旧版未压缩缓存，将读取后删除，避免 GitHub 100MB 限制报错。")
-        cache_df = read_cache_csv(CACHE_LEGACY_FILE)
-        safe_remove(CACHE_LEGACY_FILE)
-
-        if not cache_df.empty:
-            return cache_df
-
-    print("🧊 未发现可用历史缓存，准备首次全量建立缓存。")
-    return empty_cache_df()
-
-
-def write_cache_single_or_shards(cache_df):
-    """
-    关键修复：
-    旧代码直接写 sina_all_time_high_ohlc_cache.csv，导致文件 753MB，GitHub 拒绝 push。
-    新代码先写 gzip；如果 gzip 仍超过阈值，则按股票代码拆成多个 gzip 分片。
-    """
-    os.makedirs(CACHE_FOLDER, exist_ok=True)
-
-    # 先清理旧版未压缩缓存，防止 git add . 时再次提交大文件
-    safe_remove(CACHE_LEGACY_FILE)
-
-    tmp_single = f"{CACHE_FILE}.tmp"
-
-    for path in glob.glob(tmp_single):
-        safe_remove(path)
-
-    cache_df.to_csv(
-        tmp_single,
-        index=False,
-        encoding="utf-8-sig",
-        compression="gzip"
-    )
-
-    tmp_size = os.path.getsize(tmp_single)
-    print(f"📦 临时压缩缓存大小：{format_bytes(tmp_size)}")
-
-    # 如果压缩后小于阈值，直接用单文件
-    if tmp_size <= CACHE_SHARD_MAX_BYTES:
-        for old_shard in glob.glob(CACHE_SHARD_PATTERN):
-            safe_remove(old_shard)
-
-        if os.path.exists(CACHE_FILE):
-            safe_remove(CACHE_FILE)
-
-        os.replace(tmp_single, CACHE_FILE)
-
+    try:
+        df = pd.read_csv(HIGH_WATERMARK_FILE, dtype={"symbol": str, "code": str}, compression="gzip")
+        df = normalize_watermark_df(df)
         print(
-            f"✅ OHLC压缩缓存已保存：{CACHE_FILE}，"
-            f"共 {len(cache_df)} 行，大小 {format_bytes(os.path.getsize(CACHE_FILE))}。"
+            f"🧊 已加载历史高水位缓存：{HIGH_WATERMARK_FILE}，"
+            f"{len(df)} 行，大小 {format_bytes(os.path.getsize(HIGH_WATERMARK_FILE))}。"
         )
-        return
-
-    # 否则拆分
-    print(
-        f"⚠️ 压缩后仍超过安全阈值 {format_bytes(CACHE_SHARD_MAX_BYTES)}，"
-        f"将自动拆分为多个缓存分片。"
-    )
-
-    safe_remove(tmp_single)
-
-    if os.path.exists(CACHE_FILE):
-        safe_remove(CACHE_FILE)
-
-    for old_shard in glob.glob(CACHE_SHARD_PATTERN):
-        safe_remove(old_shard)
-
-    symbols = sorted(cache_df["symbol"].dropna().astype(str).unique().tolist())
-
-    if not symbols:
-        print("⚠️ 无可拆分 symbol，缓存保存失败。")
-        return
-
-    estimated_parts = max(2, math.ceil(tmp_size / (CACHE_SHARD_MAX_BYTES * 0.85)))
-    symbols_per_part = max(1, math.ceil(len(symbols) / estimated_parts))
-
-    print(
-        f"📦 预计拆分为约 {estimated_parts} 个分片，"
-        f"每片约 {symbols_per_part} 个股票。"
-    )
-
-    part_counter = [0]
-    written_files = []
-
-    def write_symbol_part(symbol_list):
-        if not symbol_list:
-            return
-
-        part_no = part_counter[0]
-        part_counter[0] += 1
-
-        part_path = os.path.join(
-            CACHE_FOLDER,
-            f"{CACHE_BASENAME}_part_{part_no:03d}.csv.gz"
-        )
-
-        part_df = cache_df[cache_df["symbol"].isin(symbol_list)].copy()
-
-        part_df.to_csv(
-            part_path,
-            index=False,
-            encoding="utf-8-sig",
-            compression="gzip"
-        )
-
-        part_size = os.path.getsize(part_path)
-
-        # 如果某个分片仍然太大，继续二分拆分
-        if part_size > CACHE_SHARD_MAX_BYTES and len(symbol_list) > 1:
-            print(
-                f"⚠️ 分片 {part_path} 仍过大：{format_bytes(part_size)}，继续拆分。"
-            )
-            safe_remove(part_path)
-
-            mid = len(symbol_list) // 2
-            write_symbol_part(symbol_list[:mid])
-            write_symbol_part(symbol_list[mid:])
-            return
-
-        if part_size > CACHE_SHARD_MAX_BYTES:
-            print(
-                f"⚠️ 单个股票分片仍超过阈值：{part_path}，"
-                f"大小 {format_bytes(part_size)}。请降低 CACHE_KEEP_ROWS。"
-            )
-
-        written_files.append(part_path)
-        print(
-            f"✅ 写入缓存分片：{part_path}，"
-            f"{len(part_df)} 行，大小 {format_bytes(part_size)}。"
-        )
-
-    for i in range(0, len(symbols), symbols_per_part):
-        write_symbol_part(symbols[i:i + symbols_per_part])
-
-    total_size = sum(os.path.getsize(path) for path in written_files if os.path.exists(path))
-
-    print(
-        f"✅ OHLC缓存分片保存完成：{len(written_files)} 个文件，"
-        f"共 {len(cache_df)} 行，总大小 {format_bytes(total_size)}。"
-    )
+        return df
+    except Exception as e:
+        print(f"⚠️ 历史高水位缓存读取失败，将重建：{str(e)}")
+        return empty_watermark_df()
 
 
-def save_cache(cache_df):
+def save_recent_cache(recent_df):
     os.makedirs(CACHE_FOLDER, exist_ok=True)
+    recent_df = normalize_recent_df(recent_df)
 
-    if cache_df is None or cache_df.empty:
-        print("⚠️ 缓存为空，本次不写入缓存文件。")
+    if recent_df.empty:
+        print("⚠️ 最近K线尾巴缓存为空，本次不写入。")
         return
 
-    cache_df = normalize_cache_df(cache_df)
+    recent_df.to_csv(RECENT_CACHE_FILE, index=False, encoding="utf-8-sig", compression="gzip")
+    print(
+        f"✅ 最近K线尾巴缓存已保存：{RECENT_CACHE_FILE}，"
+        f"{len(recent_df)} 行，大小 {format_bytes(os.path.getsize(RECENT_CACHE_FILE))}。"
+    )
 
-    if cache_df.empty:
-        print("⚠️ 清洗后缓存为空，本次不写入缓存文件。")
+
+def save_watermark_cache(watermark_df):
+    os.makedirs(CACHE_FOLDER, exist_ok=True)
+    watermark_df = normalize_watermark_df(watermark_df)
+
+    if watermark_df.empty:
+        print("⚠️ 历史高水位缓存为空，本次不写入。")
         return
 
-    cache_df = cache_df.sort_values(["symbol", "date"])
-    cache_df = cache_df.groupby("symbol", group_keys=False).tail(CACHE_KEEP_ROWS)
-    cache_df = normalize_cache_df(cache_df)
+    watermark_df.to_csv(HIGH_WATERMARK_FILE, index=False, encoding="utf-8-sig", compression="gzip")
+    print(
+        f"✅ 历史高水位缓存已保存：{HIGH_WATERMARK_FILE}，"
+        f"{len(watermark_df)} 行，大小 {format_bytes(os.path.getsize(HIGH_WATERMARK_FILE))}。"
+    )
 
-    write_cache_single_or_shards(cache_df)
 
-
-def cache_too_old(cache_df, spot_trade_date):
-    if cache_df is None or cache_df.empty:
+def cache_needs_rebuild(watermark_df, recent_df, spot_trade_date):
+    if recent_df is None or recent_df.empty:
         return True
 
-    if "open" not in cache_df.columns or "close" not in cache_df.columns:
-        return True
-
-    if cache_df["open"].isna().mean() > 0.2:
+    if BREAKOUT_MODE == "ALL_TIME_HIGH" and (watermark_df is None or watermark_df.empty):
         return True
 
     try:
-        latest_cache_date = pd.to_datetime(cache_df["date"]).max()
+        latest_cache_date = pd.to_datetime(recent_df["date"]).max()
         spot_date = pd.to_datetime(spot_trade_date)
         gap_days = (spot_date - latest_cache_date).days
 
         if gap_days > 6:
+            print(f"⚠️ 最近K线缓存距今 {gap_days} 天，缺口偏大，需要重建。")
             return True
 
-        # 防止从旧版本短缓存切换过来时，历史长度不足
-        row_count = cache_df.groupby("symbol").size()
-        if not row_count.empty:
-            median_rows = float(row_count.median())
-            if median_rows < MIN_CACHE_MEDIAN_ROWS:
-                print(f"⚠️ 当前缓存历史长度偏短，中位数仅 {median_rows:.0f} 行，需要重建。")
+        row_count = recent_df.groupby("symbol").size()
+        if row_count.empty:
+            return True
+
+        median_rows = float(row_count.median())
+        if median_rows < MIN_RECENT_MEDIAN_ROWS:
+            print(f"⚠️ 最近K线缓存历史长度偏短，中位数仅 {median_rows:.0f} 行，需要重建。")
+            return True
+
+        if BREAKOUT_MODE == "ALL_TIME_HIGH":
+            wm_symbols = set(watermark_df["symbol"].astype(str).tolist())
+            recent_symbols = set(recent_df["symbol"].astype(str).tolist())
+            coverage = len(wm_symbols & recent_symbols) / max(1, len(recent_symbols))
+
+            if coverage < 0.8:
+                print(f"⚠️ 高水位缓存覆盖率仅 {coverage:.1%}，需要重建。")
                 return True
 
         return False
 
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ 缓存状态检查失败，需要重建：{str(e)}")
         return True
+
+
+def fetch_one_history_sina(row, start_date, end_date):
+    symbol = row["symbol"]
+
+    try:
+        time.sleep(random.uniform(0.08, 0.25))
+
+        hist_df = ak.stock_zh_a_daily(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            adjust=""
+        )
+
+        if hist_df is None or hist_df.empty:
+            return None
+
+        if "date" not in hist_df.columns or "open" not in hist_df.columns or "close" not in hist_df.columns:
+            return None
+
+        hist_df = hist_df[["date", "open", "close"]].copy()
+        hist_df["date"] = hist_df["date"].apply(normalize_date)
+        hist_df["open"] = pd.to_numeric(hist_df["open"], errors="coerce")
+        hist_df["close"] = pd.to_numeric(hist_df["close"], errors="coerce")
+        hist_df = hist_df.dropna(subset=["date", "open", "close"])
+        hist_df = hist_df[(hist_df["open"] > 0) & (hist_df["close"] > 0)].copy()
+        hist_df = hist_df.drop_duplicates(subset=["date"], keep="last").sort_values("date").reset_index(drop=True)
+
+        if hist_df.empty:
+            return None
+
+        hist_df["symbol"] = row["symbol"]
+        hist_df["code"] = str(row["code"]).zfill(6)
+        hist_df["name"] = row["name"]
+        hist_df = hist_df[["symbol", "code", "name", "date", "open", "close"]]
+
+        recent_tail = hist_df.tail(RECENT_TAIL_ROWS).copy()
+
+        if BREAKOUT_MODE == "ALL_TIME_HIGH":
+            if len(hist_df) > EXCLUDE_RECENT_DAYS:
+                safe_hist = hist_df.iloc[:-EXCLUDE_RECENT_DAYS].copy().reset_index(drop=True)
+            else:
+                safe_hist = hist_df.copy().reset_index(drop=True)
+
+            if safe_hist.empty:
+                watermark = None
+            else:
+                high_idx = int(safe_hist["close"].astype(float).idxmax())
+                high_row = safe_hist.iloc[high_idx]
+                watermark = {
+                    "symbol": row["symbol"],
+                    "code": str(row["code"]).zfill(6),
+                    "name": row["name"],
+                    "high_close": float(high_row["close"]),
+                    "high_date": str(high_row["date"]),
+                    "high_trade_no": high_idx + 1,
+                    "safe_rows_count": len(safe_hist),
+                    "processed_until_date": str(safe_hist.iloc[-1]["date"]),
+                    "updated_at": cn_now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+        else:
+            # 一年新高模式主要依赖最近K线，不需要全历史高水位。
+            safe_hist = hist_df.copy().reset_index(drop=True)
+            if safe_hist.empty:
+                watermark = None
+            else:
+                high_idx = int(safe_hist["close"].astype(float).idxmax())
+                high_row = safe_hist.iloc[high_idx]
+                watermark = {
+                    "symbol": row["symbol"],
+                    "code": str(row["code"]).zfill(6),
+                    "name": row["name"],
+                    "high_close": float(high_row["close"]),
+                    "high_date": str(high_row["date"]),
+                    "high_trade_no": high_idx + 1,
+                    "safe_rows_count": len(safe_hist),
+                    "processed_until_date": str(safe_hist.iloc[-1]["date"]),
+                    "updated_at": cn_now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+
+        return {
+            "recent_tail": recent_tail.to_dict("records"),
+            "watermark": watermark,
+        }
+
+    except Exception as e:
+        print(f"⚠️ 历史K线获取失败：{row.get('name')}({row.get('code')})，原因：{str(e)}")
+        return None
+
+
+def rebuild_light_cache_from_sina(spot_df):
+    start_date, end_date = get_date_range()
+
+    print("🧱 开始重建轻量缓存：历史高水位 + 最近K线尾巴。")
+    print(f"📅 历史数据区间：{start_date} ~ {end_date}")
+    print(f"🚀 并发线程数：{MAX_WORKERS}")
+    print(f"📌 当前模式：{BREAKOUT_TITLE}")
+    print(f"📦 最近K线尾巴保留：每只股票最多 {RECENT_TAIL_ROWS} 行")
+
+    recent_rows = []
+    watermark_rows = []
+
+    total = len(spot_df)
+    finished = 0
+    records = spot_df.to_dict("records")
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(fetch_one_history_sina, row, start_date, end_date): row["symbol"]
+            for row in records
+        }
+
+        for future in as_completed(futures):
+            finished += 1
+
+            if finished % 100 == 0:
+                print(f"🔄 轻量缓存重建进度：{finished} / {total}")
+
+            result = future.result()
+            if not result:
+                continue
+
+            recent_tail = result.get("recent_tail") or []
+            watermark = result.get("watermark")
+
+            if recent_tail:
+                recent_rows.extend(recent_tail)
+
+            if watermark:
+                watermark_rows.append(watermark)
+
+    recent_df = normalize_recent_df(pd.DataFrame(recent_rows)) if recent_rows else empty_recent_df()
+    watermark_df = normalize_watermark_df(pd.DataFrame(watermark_rows)) if watermark_rows else empty_watermark_df()
+
+    print(f"✅ 轻量缓存重建完成：最近K线 {len(recent_df)} 行，高水位 {len(watermark_df)} 行。")
+
+    return watermark_df, recent_df
+
+
+def update_recent_cache_with_spot(recent_df, spot_df):
+    if spot_df is None or spot_df.empty:
+        return normalize_recent_df(recent_df)
+
+    spot_rows = spot_df[["symbol", "code", "name", "date", "open", "close"]].copy()
+    spot_rows = normalize_recent_df(spot_rows)
+
+    if spot_rows.empty:
+        print("⚠️ 新浪/网易实时行情没有可用 open/close 字段，本次不更新当天K线。")
+        return normalize_recent_df(recent_df)
+
+    if recent_df is None or recent_df.empty:
+        updated = spot_rows.copy()
+    else:
+        recent_df = normalize_recent_df(recent_df)
+        updated = pd.concat([recent_df, spot_rows], ignore_index=True)
+
+    updated = normalize_recent_df(updated)
+
+    print(f"✅ 已用新浪/网易实时行情更新最近K线尾巴，当前 {len(updated)} 行。")
+    return updated
+
+
+def update_watermark_from_recent_tail(watermark_df, recent_df):
+    """
+    把最近K线尾巴中已经不属于“最近 EXCLUDE_RECENT_DAYS 天”的数据并入历史高水位。
+    这样历史高点可以增量维护，不需要每次扫描全历史。
+    """
+    recent_df = normalize_recent_df(recent_df)
+
+    if recent_df.empty:
+        return normalize_watermark_df(watermark_df)
+
+    watermark_df = normalize_watermark_df(watermark_df)
+    wm_map = {}
+
+    for _, row in watermark_df.iterrows():
+        wm_map[str(row["symbol"])] = row.to_dict()
+
+    updated_at = cn_now().strftime("%Y-%m-%d %H:%M:%S")
+
+    for symbol, group in recent_df.groupby("symbol"):
+        group = group.drop_duplicates(subset=["date"], keep="last").sort_values("date").reset_index(drop=True)
+
+        if len(group) <= EXCLUDE_RECENT_DAYS:
+            continue
+
+        eligible = group.iloc[:-EXCLUDE_RECENT_DAYS].copy().reset_index(drop=True)
+        if eligible.empty:
+            continue
+
+        item = wm_map.get(str(symbol))
+
+        if item:
+            processed_until_date = str(item.get("processed_until_date", "1900-01-01"))
+            high_close = float(item.get("high_close", 0) or 0)
+            high_date = str(item.get("high_date", ""))
+            high_trade_no = int(item.get("high_trade_no", 0) or 0)
+            safe_rows_count = int(item.get("safe_rows_count", 0) or 0)
+        else:
+            first = eligible.iloc[0]
+            processed_until_date = "1900-01-01"
+            high_close = 0.0
+            high_date = str(first["date"])
+            high_trade_no = 0
+            safe_rows_count = 0
+            item = {
+                "symbol": str(symbol),
+                "code": str(first["code"]).zfill(6),
+                "name": str(first["name"]),
+                "high_close": high_close,
+                "high_date": high_date,
+                "high_trade_no": high_trade_no,
+                "safe_rows_count": safe_rows_count,
+                "processed_until_date": processed_until_date,
+                "updated_at": updated_at,
+            }
+
+        new_rows = eligible[eligible["date"].astype(str) > processed_until_date].copy()
+        if new_rows.empty:
+            continue
+
+        new_rows = new_rows.sort_values("date").reset_index(drop=True)
+
+        for _, r in new_rows.iterrows():
+            safe_rows_count += 1
+            close_value = float(r["close"])
+
+            if close_value > high_close:
+                high_close = close_value
+                high_date = str(r["date"])
+                high_trade_no = safe_rows_count
+
+            processed_until_date = str(r["date"])
+
+        item["code"] = str(group.iloc[-1]["code"]).zfill(6)
+        item["name"] = str(group.iloc[-1]["name"])
+        item["high_close"] = high_close
+        item["high_date"] = high_date
+        item["high_trade_no"] = high_trade_no
+        item["safe_rows_count"] = safe_rows_count
+        item["processed_until_date"] = processed_until_date
+        item["updated_at"] = updated_at
+
+        wm_map[str(symbol)] = item
+
+    new_watermark_df = pd.DataFrame(list(wm_map.values())) if wm_map else empty_watermark_df()
+    new_watermark_df = normalize_watermark_df(new_watermark_df)
+
+    print(f"✅ 已用最近K线尾巴增量更新历史高水位，当前 {len(new_watermark_df)} 只股票。")
+    return new_watermark_df
 
 
 # ================= AI解读缓存读写 =================
@@ -766,156 +931,32 @@ def make_stock_brief_cache_key(stock):
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
-# ================= 首次或缓存过旧时：新浪历史K线建缓存 =================
-def fetch_one_history_sina(row, start_date, end_date):
-    symbol = row["symbol"]
-
-    try:
-        time.sleep(random.uniform(0.08, 0.25))
-
-        hist_df = ak.stock_zh_a_daily(
-            symbol=symbol,
-            start_date=start_date,
-            end_date=end_date,
-            adjust=""
-        )
-
-        if hist_df is None or hist_df.empty:
-            return []
-
-        if "date" not in hist_df.columns or "open" not in hist_df.columns or "close" not in hist_df.columns:
-            return []
-
-        hist_df = hist_df[["date", "open", "close"]].copy()
-        hist_df["date"] = hist_df["date"].apply(normalize_date)
-        hist_df["open"] = pd.to_numeric(hist_df["open"], errors="coerce")
-        hist_df["close"] = pd.to_numeric(hist_df["close"], errors="coerce")
-        hist_df = hist_df.dropna(subset=["open", "close"])
-
-        rows = []
-
-        for _, h in hist_df.iterrows():
-            rows.append({
-                "symbol": row["symbol"],
-                "code": str(row["code"]).zfill(6),
-                "name": row["name"],
-                "date": h["date"],
-                "open": float(h["open"]),
-                "close": float(h["close"])
-            })
-
-        return rows
-
-    except Exception as e:
-        print(f"⚠️ 历史K线获取失败：{row.get('name')}({row.get('code')})，原因：{str(e)}")
-        return []
-
-
-def rebuild_history_cache_from_sina(spot_df):
-    start_date, end_date = get_date_range()
-
-    print("🧱 开始通过新浪历史K线重建OHLC缓存。")
-    print(f"📅 历史数据区间：{start_date} ~ {end_date}")
-    print(f"🚀 并发线程数：{MAX_WORKERS}")
-    print(f"📌 当前模式：{BREAKOUT_TITLE}")
-
-    rows = []
-    total = len(spot_df)
-    finished = 0
-
-    records = spot_df.to_dict("records")
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {
-            executor.submit(fetch_one_history_sina, row, start_date, end_date): row["symbol"]
-            for row in records
-        }
-
-        for future in as_completed(futures):
-            finished += 1
-
-            if finished % 100 == 0:
-                print(f"🔄 历史缓存进度：{finished} / {total}")
-
-            result_rows = future.result()
-            if result_rows:
-                rows.extend(result_rows)
-
-    if not rows:
-        print("⚠️ OHLC历史缓存重建失败，未获取到历史K线。")
-        return empty_cache_df()
-
-    cache_df = pd.DataFrame(rows)
-    cache_df = cache_df.drop_duplicates(subset=["symbol", "date"], keep="last")
-
-    print(f"✅ OHLC历史缓存重建完成，共 {len(cache_df)} 行。")
-    return cache_df
-
-
-def update_cache_with_spot(cache_df, spot_df):
-    if spot_df is None or spot_df.empty:
-        return cache_df
-
-    spot_rows = spot_df[["symbol", "code", "name", "date", "open", "close"]].copy()
-    spot_rows["date"] = spot_rows["date"].astype(str)
-    spot_rows["open"] = pd.to_numeric(spot_rows["open"], errors="coerce")
-    spot_rows["close"] = pd.to_numeric(spot_rows["close"], errors="coerce")
-    spot_rows = spot_rows.dropna(subset=["open", "close"])
-
-    if spot_rows.empty:
-        print("⚠️ 新浪/网易实时行情没有可用 open 字段，本次不更新当天K线。")
-        return cache_df
-
-    if cache_df is None or cache_df.empty:
-        updated = spot_rows.copy()
-    else:
-        cache_df = cache_df.copy()
-
-        cache_df["key"] = cache_df["symbol"].astype(str) + "_" + cache_df["date"].astype(str)
-        spot_rows["key"] = spot_rows["symbol"].astype(str) + "_" + spot_rows["date"].astype(str)
-
-        cache_df = cache_df[~cache_df["key"].isin(set(spot_rows["key"]))].drop(columns=["key"])
-        spot_rows = spot_rows.drop(columns=["key"])
-
-        updated = pd.concat([cache_df, spot_rows], ignore_index=True)
-
-    updated = updated.drop_duplicates(subset=["symbol", "date"], keep="last")
-    updated = updated.sort_values(["symbol", "date"])
-
-    print(f"✅ 已用新浪/网易实时行情更新OHLC缓存，当前缓存 {len(updated)} 行。")
-    return updated
-
-
 # ================= 核心筛选：历史新高 / 一年内前期新高 =================
-def screen_from_cache(cache_df):
+def screen_from_light_cache(watermark_df, recent_df):
     """
-    两个版本共用这一套逻辑：
+    BREAKOUT_MODE = ALL_TIME_HIGH：
+    - 用 high_watermark 判断上市以来历史收盘前高。
+    - 用 recent_tail 计算均线、涨幅、红K、过热过滤。
 
-    BREAKOUT_MODE = "ALL_TIME_HIGH"
-    - 判断最新收盘价是否突破上市以来历史收盘高点。
-
-    BREAKOUT_MODE = "ONE_YEAR_HIGH"
-    - 判断最新收盘价是否突破最近一年以内的前期收盘高点。
-
-    当前沿用原缓存，只使用 open / close。
-    所以这里判断的是“收盘新高”，不是盘中新高。
+    BREAKOUT_MODE = ONE_YEAR_HIGH：
+    - 直接用 recent_tail 中最近约一年数据判断前高。
     """
-    print(f"🧮 正在从本地缓存中执行【{BREAKOUT_TITLE}】筛选...")
+    print(f"🧮 正在从轻量缓存中执行【{BREAKOUT_TITLE}】筛选...")
 
     results = []
     fallback_results = []
 
-    if cache_df is None or cache_df.empty:
+    recent_df = normalize_recent_df(recent_df)
+    watermark_df = normalize_watermark_df(watermark_df)
+
+    if recent_df.empty:
         print(f"今日未筛选到{BREAKOUT_TITLE}股票。")
         return None
 
-    cache_df = cache_df.copy()
-    cache_df["date"] = cache_df["date"].astype(str)
-    cache_df["open"] = pd.to_numeric(cache_df["open"], errors="coerce")
-    cache_df["close"] = pd.to_numeric(cache_df["close"], errors="coerce")
-    cache_df = cache_df.dropna(subset=["symbol", "date", "open", "close"])
-    cache_df = cache_df[(cache_df["open"] > 0) & (cache_df["close"] > 0)].copy()
-    cache_df = cache_df.sort_values(["symbol", "date"])
+    wm_map = {}
+    if not watermark_df.empty:
+        for _, row in watermark_df.iterrows():
+            wm_map[str(row["symbol"])] = row.to_dict()
 
     def pct_change(close_series, days):
         if len(close_series) <= days:
@@ -945,7 +986,7 @@ def screen_from_cache(cache_df):
 
         return float(max(0, min(100, raw)))
 
-    for symbol, group in cache_df.groupby("symbol"):
+    for symbol, group in recent_df.groupby("symbol"):
         group = group.drop_duplicates(subset=["date"], keep="last").sort_values("date")
         group = group.reset_index(drop=True)
 
@@ -953,7 +994,7 @@ def screen_from_cache(cache_df):
             continue
 
         if BREAKOUT_MODE == "ALL_TIME_HIGH":
-            lookback = group.copy()
+            lookback = group.copy().reset_index(drop=True)
         else:
             lookback = group.tail(NEW_HIGH_LOOKBACK).copy().reset_index(drop=True)
 
@@ -961,7 +1002,6 @@ def screen_from_cache(cache_df):
             continue
 
         close = lookback["close"].astype(float)
-        open_ = lookback["open"].astype(float)
 
         latest_row = lookback.iloc[-1]
         latest_close = float(latest_row["close"])
@@ -973,37 +1013,70 @@ def screen_from_cache(cache_df):
         if len(lookback) <= EXCLUDE_RECENT_DAYS + 20:
             continue
 
-        # 前高：排除最近几天，避免刚突破后的价格污染前高
-        prev_part = lookback.iloc[:-EXCLUDE_RECENT_DAYS].copy().reset_index(drop=True)
-        prev_close = prev_part["close"].astype(float)
+        if BREAKOUT_MODE == "ALL_TIME_HIGH":
+            wm = wm_map.get(str(symbol))
+            if not wm:
+                continue
 
-        if prev_close.empty:
-            continue
+            prev_high = float(wm.get("high_close", 0) or 0)
+            prev_high_date = str(wm.get("high_date", ""))
+            high_trade_no = int(wm.get("high_trade_no", 0) or 0)
+            safe_rows_count = int(wm.get("safe_rows_count", 0) or 0)
+            processed_until_date = str(wm.get("processed_until_date", "1900-01-01"))
 
-        prev_high = float(prev_close.max())
-        prev_high_idx = int(prev_close.idxmax())
-        prev_high_row = prev_part.iloc[prev_high_idx]
-        prev_high_date = str(prev_high_row["date"])
+            if prev_high <= 0:
+                continue
 
-        if prev_high <= 0:
-            continue
+            # latest_total_rows 用于估算前高距今交易日。
+            unprocessed_count = int((lookback["date"].astype(str) > processed_until_date).sum())
+            latest_total_rows = safe_rows_count + unprocessed_count
+            days_since_prev_high = max(0, latest_total_rows - high_trade_no)
+
+            global_recent_high = float(close.max())
+            is_window_new_high = latest_close >= max(prev_high, global_recent_high) * 0.999
+
+            recent_for_break = lookback.tail(JUST_BREAK_DAYS + EXCLUDE_RECENT_DAYS).copy()
+            recent_break_count = int((recent_for_break["close"].astype(float) > prev_high).sum())
+
+            prev_day_close = float(lookback.iloc[-2]["close"]) if len(lookback) >= 2 else latest_close
+            prev_day_break_above = (prev_day_close / prev_high - 1) * 100
+
+            near_prev_high_source = lookback.iloc[:-EXCLUDE_RECENT_DAYS].copy()
+            near_prev_high_count = int((near_prev_high_source["close"].astype(float) >= prev_high * 0.92).sum())
+            prev_window_low = float(near_prev_high_source["close"].astype(float).min()) if not near_prev_high_source.empty else float(close.min())
+
+        else:
+            prev_part = lookback.iloc[:-EXCLUDE_RECENT_DAYS].copy().reset_index(drop=True)
+            prev_close = prev_part["close"].astype(float)
+
+            if prev_close.empty:
+                continue
+
+            prev_high = float(prev_close.max())
+            prev_high_idx = int(prev_close.idxmax())
+            prev_high_row = prev_part.iloc[prev_high_idx]
+            prev_high_date = str(prev_high_row["date"])
+
+            if prev_high <= 0:
+                continue
+
+            window_high = float(close.max())
+            is_window_new_high = latest_close >= window_high * 0.999
+
+            recent_for_break = lookback.tail(JUST_BREAK_DAYS + EXCLUDE_RECENT_DAYS).copy()
+            recent_break_count = int((recent_for_break["close"].astype(float) > prev_high).sum())
+
+            prev_day_close = float(lookback.iloc[-2]["close"]) if len(lookback) >= 2 else latest_close
+            prev_day_break_above = (prev_day_close / prev_high - 1) * 100
+
+            latest_idx = len(lookback) - 1
+            days_since_prev_high = latest_idx - prev_high_idx
+
+            near_prev_high_count = int((prev_close >= prev_high * 0.92).sum())
+            prev_window_low = float(prev_close.min())
 
         break_above_prev_high = (latest_close / prev_high - 1) * 100
-
-        # 最新收盘价是否为观察范围新高
-        window_high = float(close.max())
-        is_window_new_high = latest_close >= window_high * 0.999
-
-        # 最近是否刚突破
-        recent = lookback.tail(JUST_BREAK_DAYS + EXCLUDE_RECENT_DAYS).copy()
-        recent_close = recent["close"].astype(float)
-        recent_break_count = int((recent_close > prev_high).sum())
-
-        prev_day_close = float(lookback.iloc[-2]["close"]) if len(lookback) >= 2 else latest_close
-        prev_day_break_above = (prev_day_close / prev_high - 1) * 100
-
-        latest_idx = len(lookback) - 1
-        days_since_prev_high = latest_idx - prev_high_idx
+        prev_window_range = (prev_high / prev_window_low - 1) * 100 if prev_window_low > 0 else 999
 
         # 涨幅
         daily_pct = close.pct_change() * 100
@@ -1048,10 +1121,6 @@ def screen_from_cache(cache_df):
         ma_bull = latest_close >= ma5 >= ma10 >= ma20
         ma_turning = latest_close >= ma5 and ma5 >= ma10 * 0.98 and ma10 >= ma20 * 0.96
         medium_trend_ok = latest_close >= ma20 * 0.95 and ma20 >= ma60 * 0.82
-
-        near_prev_high_count = int((prev_close >= prev_high * 0.92).sum())
-        prev_window_low = float(prev_close.min())
-        prev_window_range = (prev_high / prev_window_low - 1) * 100 if prev_window_low > 0 else 999
 
         # ================= 硬过滤 =================
         if break_above_prev_high < MIN_BREAK_ABOVE:
@@ -1319,23 +1388,29 @@ def screen_from_cache(cache_df):
 
 
 def get_surge_stocks():
+    cleanup_legacy_cache_files()
+
     spot_df = get_all_a_stock_spot_sina()
 
     if spot_df is None or spot_df.empty:
         return "ERROR"
 
-    cache_df = load_cache()
+    watermark_df = load_watermark_cache()
+    recent_df = load_recent_cache()
 
     spot_trade_date = str(spot_df["date"].iloc[0])
 
-    if cache_too_old(cache_df, spot_trade_date):
-        print("⚠️ 缓存为空、字段不完整、历史长度不足或过旧，将全量重建。首次运行会比较慢。")
-        cache_df = rebuild_history_cache_from_sina(spot_df)
+    if cache_needs_rebuild(watermark_df, recent_df, spot_trade_date):
+        print("⚠️ 轻量缓存为空、过旧或覆盖不足，将重建。首次运行会比较慢。")
+        watermark_df, recent_df = rebuild_light_cache_from_sina(spot_df)
 
-    cache_df = update_cache_with_spot(cache_df, spot_df)
-    save_cache(cache_df)
+    recent_df = update_recent_cache_with_spot(recent_df, spot_df)
+    watermark_df = update_watermark_from_recent_tail(watermark_df, recent_df)
 
-    return screen_from_cache(cache_df)
+    save_recent_cache(recent_df)
+    save_watermark_cache(watermark_df)
+
+    return screen_from_light_cache(watermark_df, recent_df)
 
 
 # ================= DeepSeek =================
@@ -1539,7 +1614,7 @@ draft: false
 
 # 🚀 {BREAKOUT_TITLE}雷达：股票扫描
 
-本报告由 **Python + 新浪/网易行情接口 + 本地OHLC缓存 + DeepSeek AI** 自动生成。
+本报告由 **Python + 新浪/网易行情接口 + 轻量缓存 + DeepSeek AI** 自动生成。
 
 > ⚠️ 风险提示：本文仅为基于公开行情数据的自动化整理与AI文本生成，不构成任何投资建议。股市有风险，交易需谨慎。
 
@@ -1550,6 +1625,7 @@ draft: false
 - 刚突破判断：排除最近 **{EXCLUDE_RECENT_DAYS}** 天后计算前高，尽量识别刚刚突破
 - 风险过滤：过滤突破过远、涨幅过大、涨停过多、偏离20日线过远的标的
 - 当前限制：本程序沿用原接口和缓存，只使用 open / close，判断的是“收盘新高”，不是盘中最高价新高
+- 轻量缓存：历史新高模式只保存每只股票历史最高收盘价状态 + 最近 {RECENT_TAIL_ROWS} 条K线尾巴
 - 排名方式：按新高突破评分排序，截取 TOP {TOP_N}
 - 当前模式：{BREAKOUT_MODE}
 - 数据来源：新浪行情接口为主，网易行情接口兜底
@@ -1660,6 +1736,6 @@ draft: false
 
 # ================= 主程序 =================
 if __name__ == "__main__":
-    cleanup_old_cache_files()
+    cleanup_legacy_cache_files()
     stock_list = get_surge_stocks()
     write_blog_post(stock_list)
