@@ -2,6 +2,7 @@ import os
 import glob
 import json
 import time
+import math
 import random
 import hashlib
 import datetime
@@ -17,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 BREAKOUT_MODE = "ALL_TIME_HIGH"
 
 # 版本2：突破一年以内前期新高
-# BREAKOUT_MODE = "ALL_TIME_HIGH"
+# BREAKOUT_MODE = "ONE_YEAR_HIGH"
 
 
 # ================= 参数区 =================
@@ -35,9 +36,17 @@ POST_FOLDER = "content/post"
 
 CACHE_FOLDER = "stock_cache"
 
+# GitHub 单文件限制 100MB，这里保守控制在 90MB 以内
+CACHE_SHARD_MAX_BYTES = int(os.environ.get("CACHE_SHARD_MAX_BYTES", str(90 * 1024 * 1024)))
+
 if BREAKOUT_MODE == "ALL_TIME_HIGH":
     REPORT_PREFIX = "alltimehigh"
-    CACHE_FILE = os.path.join(CACHE_FOLDER, "sina_all_time_high_ohlc_cache.csv")
+
+    CACHE_BASENAME = "sina_all_time_high_ohlc_cache"
+    CACHE_FILE = os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}.csv.gz")
+    CACHE_LEGACY_FILE = os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}.csv")
+    CACHE_SHARD_PATTERN = os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}_part_*.csv.gz")
+
     AI_CACHE_FILE = os.path.join(CACHE_FOLDER, "deepseek_all_time_high_stock_brief_cache.json")
     AI_CACHE_VERSION = "all_time_high_stock_brief_v1"
 
@@ -51,7 +60,12 @@ if BREAKOUT_MODE == "ALL_TIME_HIGH":
 
 else:
     REPORT_PREFIX = "oneyearhigh"
-    CACHE_FILE = os.path.join(CACHE_FOLDER, "sina_one_year_high_ohlc_cache.csv")
+
+    CACHE_BASENAME = "sina_one_year_high_ohlc_cache"
+    CACHE_FILE = os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}.csv.gz")
+    CACHE_LEGACY_FILE = os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}.csv")
+    CACHE_SHARD_PATTERN = os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}_part_*.csv.gz")
+
     AI_CACHE_FILE = os.path.join(CACHE_FOLDER, "deepseek_one_year_high_stock_brief_cache.json")
     AI_CACHE_VERSION = "one_year_high_stock_brief_v1"
 
@@ -250,6 +264,46 @@ def find_column(columns, keywords):
     return None
 
 
+def format_bytes(size):
+    try:
+        size = float(size)
+    except Exception:
+        return "0 B"
+
+    units = ["B", "KB", "MB", "GB"]
+    for unit in units:
+        if size < 1024:
+            return f"{size:.2f} {unit}"
+        size /= 1024
+
+    return f"{size:.2f} TB"
+
+
+def safe_remove(path):
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+            print(f"🧹 已删除旧文件：{path}")
+    except Exception as e:
+        print(f"⚠️ 删除文件失败：{path}，原因：{str(e)}")
+
+
+def cleanup_old_cache_files():
+    """
+    清理旧版未压缩大 CSV，避免 GitHub Actions 再次把超过 100MB 的文件提交上去。
+    """
+    safe_remove(CACHE_LEGACY_FILE)
+
+    tmp_patterns = [
+        os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}.csv.gz.tmp"),
+        os.path.join(CACHE_FOLDER, f"{CACHE_BASENAME}_part_*.tmp"),
+    ]
+
+    for pattern in tmp_patterns:
+        for path in glob.glob(pattern):
+            safe_remove(path)
+
+
 # ================= 新浪/网易全市场实时行情 =================
 def get_all_a_stock_spot_sina():
     print("📈 正在通过【新浪/网易】获取A股全市场实时行情...")
@@ -369,31 +423,217 @@ def empty_cache_df():
     return pd.DataFrame(columns=["symbol", "code", "name", "date", "open", "close"])
 
 
-def load_cache():
-    if not os.path.exists(CACHE_FILE):
-        print("🧊 未发现历史缓存，准备首次全量建立缓存。")
+def normalize_cache_df(cache_df):
+    if cache_df is None or cache_df.empty:
         return empty_cache_df()
 
+    required_cols = ["symbol", "code", "name", "date", "open", "close"]
+    for col in required_cols:
+        if col not in cache_df.columns:
+            print(f"⚠️ 缓存缺少字段 {col}。")
+            return empty_cache_df()
+
+    cache_df = cache_df[required_cols].copy()
+
+    cache_df["symbol"] = cache_df["symbol"].astype(str)
+    cache_df["code"] = cache_df["code"].apply(clean_stock_code)
+    cache_df["name"] = cache_df["name"].astype(str)
+    cache_df["date"] = cache_df["date"].astype(str)
+    cache_df["open"] = pd.to_numeric(cache_df["open"], errors="coerce")
+    cache_df["close"] = pd.to_numeric(cache_df["close"], errors="coerce")
+
+    cache_df = cache_df.dropna(subset=["symbol", "code", "name", "date", "open", "close"])
+    cache_df = cache_df[(cache_df["open"] > 0) & (cache_df["close"] > 0)].copy()
+    cache_df = cache_df.drop_duplicates(subset=["symbol", "date"], keep="last")
+    cache_df = cache_df.sort_values(["symbol", "date"])
+
+    return cache_df
+
+
+def read_cache_csv(path):
     try:
-        cache_df = pd.read_csv(CACHE_FILE, dtype={"symbol": str, "code": str})
+        compression = "gzip" if str(path).endswith(".gz") else None
+        df = pd.read_csv(path, dtype={"symbol": str, "code": str}, compression=compression)
+        df = normalize_cache_df(df)
+        print(f"🧊 已读取缓存文件：{path}，{len(df)} 行，文件大小 {format_bytes(os.path.getsize(path))}。")
+        return df
+    except Exception as e:
+        print(f"⚠️ 缓存读取失败：{path}，原因：{str(e)}")
+        return empty_cache_df()
 
-        required_cols = ["symbol", "code", "name", "date", "open", "close"]
-        for col in required_cols:
-            if col not in cache_df.columns:
-                print(f"⚠️ 缓存缺少字段 {col}，需要重建缓存。")
-                return empty_cache_df()
 
-        cache_df["date"] = cache_df["date"].astype(str)
-        cache_df["open"] = pd.to_numeric(cache_df["open"], errors="coerce")
-        cache_df["close"] = pd.to_numeric(cache_df["close"], errors="coerce")
-        cache_df = cache_df.dropna(subset=["symbol", "date", "open", "close"])
+def load_cache():
+    os.makedirs(CACHE_FOLDER, exist_ok=True)
+    cleanup_old_cache_files()
 
-        print(f"🧊 已加载历史缓存：{len(cache_df)} 行。")
+    shard_files = sorted(glob.glob(CACHE_SHARD_PATTERN))
+
+    if shard_files:
+        print(f"🧊 发现分片缓存：{len(shard_files)} 个。")
+        frames = []
+
+        for path in shard_files:
+            df = read_cache_csv(path)
+            if df is not None and not df.empty:
+                frames.append(df)
+
+        if not frames:
+            print("⚠️ 分片缓存均为空，需要重建缓存。")
+            return empty_cache_df()
+
+        cache_df = pd.concat(frames, ignore_index=True)
+        cache_df = normalize_cache_df(cache_df)
+
+        print(f"🧊 已加载分片历史缓存：{len(cache_df)} 行。")
         return cache_df
 
-    except Exception as e:
-        print(f"⚠️ 历史缓存读取失败，将重建缓存：{str(e)}")
-        return empty_cache_df()
+    if os.path.exists(CACHE_FILE):
+        cache_df = read_cache_csv(CACHE_FILE)
+        if not cache_df.empty:
+            print(f"🧊 已加载压缩历史缓存：{len(cache_df)} 行。")
+            return cache_df
+
+    if os.path.exists(CACHE_LEGACY_FILE):
+        print("⚠️ 发现旧版未压缩缓存，将读取后删除，避免 GitHub 100MB 限制报错。")
+        cache_df = read_cache_csv(CACHE_LEGACY_FILE)
+        safe_remove(CACHE_LEGACY_FILE)
+
+        if not cache_df.empty:
+            return cache_df
+
+    print("🧊 未发现可用历史缓存，准备首次全量建立缓存。")
+    return empty_cache_df()
+
+
+def write_cache_single_or_shards(cache_df):
+    """
+    关键修复：
+    旧代码直接写 sina_all_time_high_ohlc_cache.csv，导致文件 753MB，GitHub 拒绝 push。
+    新代码先写 gzip；如果 gzip 仍超过阈值，则按股票代码拆成多个 gzip 分片。
+    """
+    os.makedirs(CACHE_FOLDER, exist_ok=True)
+
+    # 先清理旧版未压缩缓存，防止 git add . 时再次提交大文件
+    safe_remove(CACHE_LEGACY_FILE)
+
+    tmp_single = f"{CACHE_FILE}.tmp"
+
+    for path in glob.glob(tmp_single):
+        safe_remove(path)
+
+    cache_df.to_csv(
+        tmp_single,
+        index=False,
+        encoding="utf-8-sig",
+        compression="gzip"
+    )
+
+    tmp_size = os.path.getsize(tmp_single)
+    print(f"📦 临时压缩缓存大小：{format_bytes(tmp_size)}")
+
+    # 如果压缩后小于阈值，直接用单文件
+    if tmp_size <= CACHE_SHARD_MAX_BYTES:
+        for old_shard in glob.glob(CACHE_SHARD_PATTERN):
+            safe_remove(old_shard)
+
+        if os.path.exists(CACHE_FILE):
+            safe_remove(CACHE_FILE)
+
+        os.replace(tmp_single, CACHE_FILE)
+
+        print(
+            f"✅ OHLC压缩缓存已保存：{CACHE_FILE}，"
+            f"共 {len(cache_df)} 行，大小 {format_bytes(os.path.getsize(CACHE_FILE))}。"
+        )
+        return
+
+    # 否则拆分
+    print(
+        f"⚠️ 压缩后仍超过安全阈值 {format_bytes(CACHE_SHARD_MAX_BYTES)}，"
+        f"将自动拆分为多个缓存分片。"
+    )
+
+    safe_remove(tmp_single)
+
+    if os.path.exists(CACHE_FILE):
+        safe_remove(CACHE_FILE)
+
+    for old_shard in glob.glob(CACHE_SHARD_PATTERN):
+        safe_remove(old_shard)
+
+    symbols = sorted(cache_df["symbol"].dropna().astype(str).unique().tolist())
+
+    if not symbols:
+        print("⚠️ 无可拆分 symbol，缓存保存失败。")
+        return
+
+    estimated_parts = max(2, math.ceil(tmp_size / (CACHE_SHARD_MAX_BYTES * 0.85)))
+    symbols_per_part = max(1, math.ceil(len(symbols) / estimated_parts))
+
+    print(
+        f"📦 预计拆分为约 {estimated_parts} 个分片，"
+        f"每片约 {symbols_per_part} 个股票。"
+    )
+
+    part_counter = [0]
+    written_files = []
+
+    def write_symbol_part(symbol_list):
+        if not symbol_list:
+            return
+
+        part_no = part_counter[0]
+        part_counter[0] += 1
+
+        part_path = os.path.join(
+            CACHE_FOLDER,
+            f"{CACHE_BASENAME}_part_{part_no:03d}.csv.gz"
+        )
+
+        part_df = cache_df[cache_df["symbol"].isin(symbol_list)].copy()
+
+        part_df.to_csv(
+            part_path,
+            index=False,
+            encoding="utf-8-sig",
+            compression="gzip"
+        )
+
+        part_size = os.path.getsize(part_path)
+
+        # 如果某个分片仍然太大，继续二分拆分
+        if part_size > CACHE_SHARD_MAX_BYTES and len(symbol_list) > 1:
+            print(
+                f"⚠️ 分片 {part_path} 仍过大：{format_bytes(part_size)}，继续拆分。"
+            )
+            safe_remove(part_path)
+
+            mid = len(symbol_list) // 2
+            write_symbol_part(symbol_list[:mid])
+            write_symbol_part(symbol_list[mid:])
+            return
+
+        if part_size > CACHE_SHARD_MAX_BYTES:
+            print(
+                f"⚠️ 单个股票分片仍超过阈值：{part_path}，"
+                f"大小 {format_bytes(part_size)}。请降低 CACHE_KEEP_ROWS。"
+            )
+
+        written_files.append(part_path)
+        print(
+            f"✅ 写入缓存分片：{part_path}，"
+            f"{len(part_df)} 行，大小 {format_bytes(part_size)}。"
+        )
+
+    for i in range(0, len(symbols), symbols_per_part):
+        write_symbol_part(symbols[i:i + symbols_per_part])
+
+    total_size = sum(os.path.getsize(path) for path in written_files if os.path.exists(path))
+
+    print(
+        f"✅ OHLC缓存分片保存完成：{len(written_files)} 个文件，"
+        f"共 {len(cache_df)} 行，总大小 {format_bytes(total_size)}。"
+    )
 
 
 def save_cache(cache_df):
@@ -403,11 +643,7 @@ def save_cache(cache_df):
         print("⚠️ 缓存为空，本次不写入缓存文件。")
         return
 
-    cache_df = cache_df.dropna(subset=["symbol", "date", "open", "close"]).copy()
-    cache_df["date"] = cache_df["date"].astype(str)
-    cache_df["open"] = pd.to_numeric(cache_df["open"], errors="coerce")
-    cache_df["close"] = pd.to_numeric(cache_df["close"], errors="coerce")
-    cache_df = cache_df.dropna(subset=["open", "close"])
+    cache_df = normalize_cache_df(cache_df)
 
     if cache_df.empty:
         print("⚠️ 清洗后缓存为空，本次不写入缓存文件。")
@@ -415,9 +651,9 @@ def save_cache(cache_df):
 
     cache_df = cache_df.sort_values(["symbol", "date"])
     cache_df = cache_df.groupby("symbol", group_keys=False).tail(CACHE_KEEP_ROWS)
+    cache_df = normalize_cache_df(cache_df)
 
-    cache_df.to_csv(CACHE_FILE, index=False, encoding="utf-8-sig")
-    print(f"✅ OHLC缓存已保存：{CACHE_FILE}，共 {len(cache_df)} 行。")
+    write_cache_single_or_shards(cache_df)
 
 
 def cache_too_old(cache_df, spot_trade_date):
@@ -1424,5 +1660,6 @@ draft: false
 
 # ================= 主程序 =================
 if __name__ == "__main__":
+    cleanup_old_cache_files()
     stock_list = get_surge_stocks()
     write_blog_post(stock_list)
