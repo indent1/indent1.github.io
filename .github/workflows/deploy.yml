@@ -1,188 +1,224 @@
 name: Auto Publish and Deploy
 
 on:
-  push:
-    branches:
-      - main
-      - master
-  workflow_dispatch:
-  schedule:
-    # 每天北京时间 15:35 自动运行 (UTC 07:35)
-    - cron: '35 7 * * 1-5'
+push:
+branches:
+- main
+- master
+workflow_dispatch:
 
 permissions:
-  contents: write    # 🌟 赋予机器人写入代码库的权限（用于保存文章）
-  pages: write
-  id-token: write
+contents: write
+pages: write
+id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: false
+group: pages
+cancel-in-progress: false
 
 defaults:
-  run:
-    shell: bash
+run:
+shell: bash
 
 jobs:
-  build_and_deploy:
-    runs-on: ubuntu-latest
-    env:
-      DART_SASS_VERSION: 1.97.1
-      GO_VERSION: 1.25.5
-      HUGO_VERSION: 0.154.2
-      NODE_VERSION: 24.12.0
-      TZ: Asia/Shanghai
-      # 🌟 如果你的 py 程序需要调用 AI，记得在这里注入密钥
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+build_and_deploy:
+runs-on: ubuntu-latest
+env:
+DART_SASS_VERSION: 1.97.1
+GO_VERSION: 1.25.5
+HUGO_VERSION: 0.154.2
+NODE_VERSION: 24.12.0
+TZ: Asia/Shanghai
+DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
-    steps:
-      # 1. 拉取代码
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          submodules: recursive
-          fetch-depth: 0 # 获取完整历史，防止 commit 时报错
+```
+steps:
+  # 1. 拉取代码
+  - name: Checkout
+    uses: actions/checkout@v6
+    with:
+      submodules: recursive
+      fetch-depth: 0
 
-      # 2. 配置 Python 环境
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+  # 2. 配置 Python 环境
+  - name: Setup Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: '3.10'
 
-      # 3. 安装 Python 依赖库 (如果用到其他库，请在后面加上，空格隔开)
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests pandas akshare
+  # 3. 安装 Python 依赖库
+  # 这里多装一点，保证 auto_post.py / highest.py / meigu_web1.py 都能跑
+  - name: Install Python dependencies
+    run: |
+      python -m pip install --upgrade pip
+      pip install requests pandas akshare beautifulsoup4 lxml yfinance matplotlib mplfinance
 
-      # 4. 🚀 核心逻辑：运行截图里的那两个 py 脚本
-      - name: Run Python AI Scripts
-        run: |
-          echo "Preparing output folders..."
-          mkdir -p content/post
-          mkdir -p stock_cache
+  # 4. 运行 Python 脚本
+  # 三个脚本都会尝试运行；如果其中一个失败，最后让 Actions 变红，方便看日志定位
+  - name: Run Python AI Scripts
+    run: |
+      echo "Preparing output folders..."
+      mkdir -p content/post
+      mkdir -p stock_cache
+      mkdir -p static/images
 
-          echo "1. Running auto_post.py..."
-          python auto_post.py || echo "auto_post.py failed"
+      failed=0
 
-          echo "2. Running highest.py..."
-          python highest.py || echo "highest.py failed"
+      run_script() {
+        script="$1"
+        label="$2"
 
-          echo "3. Running meigu_web1.py..."
-          python meigu_web1.py || echo "meigu_web1.py failed"
+        echo ""
+        echo "$label"
 
-      # 5. 配置机器人的 Git 账号
-      - name: Configure Git
-        run: |
-          git config core.quotepath false
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+        if [ ! -f "$script" ]; then
+          echo "::error file=$script::$script not found"
+          failed=1
+          return
+        fi
 
-      # 6. 🚀 核心逻辑：把生成的文章保存(Commit)到仓库里
-      - name: Commit all generated reports and cache
-        run: |
-          # 备份生成的文件
-          rm -rf /tmp/all_generated
-          mkdir -p /tmp/all_generated/post
-          mkdir -p /tmp/all_generated/stock_cache
-          
-          cp content/post/*.md /tmp/all_generated/post/ 2>/dev/null || true
-          if [ -d "stock_cache" ]; then
-            cp -a stock_cache/. /tmp/all_generated/stock_cache/ 2>/dev/null || true
-          fi
+        if python -u "$script"; then
+          echo "✅ $script finished"
+        else
+          echo "::error file=$script::$script failed"
+          failed=1
+        fi
+      }
 
-          # 同步远程最新状态，防止 Push 冲突
-          echo "Syncing latest remote branch..."
-          git fetch origin "${GITHUB_REF_NAME}"
-          git reset --hard "origin/${GITHUB_REF_NAME}"
+      run_script "auto_post.py" "1. Running auto_post.py..."
+      run_script "highest.py" "2. Running highest.py..."
+      run_script "meigu_web1.py" "3. Running meigu_web1.py..."
 
-          # 还原生成的文件
-          mkdir -p content/post
-          mkdir -p stock_cache
-          cp /tmp/all_generated/post/*.md content/post/ 2>/dev/null || true
-          cp -a /tmp/all_generated/stock_cache/. stock_cache/ 2>/dev/null || true
+      if [ "$failed" -ne 0 ]; then
+        echo ""
+        echo "❌ One or more Python scripts failed. Please check the log above."
+        exit 1
+      fi
 
-          # 提交并推送到 GitHub 仓库
-          if [ -n "$(git status --porcelain -- content/post stock_cache)" ]; then
-            git add content/post stock_cache
-            git commit -m "🤖 AI 自动更新今日量化复盘报告 [skip ci]"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
-          else
-            echo "没有检测到新文章，跳过提交。"
-          fi
+      echo ""
+      echo "✅ All Python scripts finished successfully."
 
-      # 7. 配置建站环境 (Go, Node, Hugo, Pages)
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
+  # 5. 配置机器人的 Git 账号
+  - name: Configure Git
+    run: |
+      git config core.quotepath false
+      git config user.name "github-actions[bot]"
+      git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
+  # 6. 把生成的文章、缓存和图片保存到仓库
+  - name: Commit all generated reports and cache
+    run: |
+      rm -rf /tmp/all_generated
+      mkdir -p /tmp/all_generated/post
+      mkdir -p /tmp/all_generated/stock_cache
+      mkdir -p /tmp/all_generated/static/images
 
-      - name: Setup Pages
-        id: pages
-        uses: actions/configure-pages@v6
+      if [ -d "content/post" ]; then
+        cp -a content/post/. /tmp/all_generated/post/ 2>/dev/null || true
+      fi
 
-      - name: Install Dart Sass
-        run: |
-          mkdir -p "${HOME}/.local"
-          curl -sLJO "https://github.com/sass/dart-sass/releases/download/${DART_SASS_VERSION}/dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
-          tar -C "${HOME}/.local" -xf "dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
-          rm "dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
-          echo "${HOME}/.local/dart-sass" >> "${GITHUB_PATH}"
+      if [ -d "stock_cache" ]; then
+        cp -a stock_cache/. /tmp/all_generated/stock_cache/ 2>/dev/null || true
+      fi
 
-      - name: Setup Hugo
-        uses: peaceiris/actions-hugo@v3
-        with:
-          hugo-version: 'latest'
-          extended: true
+      if [ -d "static/images" ]; then
+        cp -a static/images/. /tmp/all_generated/static/images/ 2>/dev/null || true
+      fi
 
-      - name: Install Node.js dependencies
-        run: |
-          [[ -f package-lock.json || -f npm-shrinkwrap.json ]] && npm ci || true
+      echo "Syncing latest remote branch..."
+      git fetch origin "${GITHUB_REF_NAME}"
+      git reset --hard "origin/${GITHUB_REF_NAME}"
 
-      # 8. 开始用 Hugo 排版网页
-      - name: Cache restore
-        id: cache-restore
-        uses: actions/cache/restore@v5
-        with:
-          path: ${{ runner.temp }}/hugo_cache
-          key: hugo-${{ github.run_id }}
-          restore-keys: hugo-
+      mkdir -p content/post
+      mkdir -p stock_cache
+      mkdir -p static/images
 
-      - name: Build the site
-        run: |
-          hugo \
-            --gc \
-            --minify \
-            --baseURL "${{ steps.pages.outputs.base_url }}/" \
-            --cacheDir "${{ runner.temp }}/hugo_cache"
+      cp -a /tmp/all_generated/post/. content/post/ 2>/dev/null || true
+      cp -a /tmp/all_generated/stock_cache/. stock_cache/ 2>/dev/null || true
+      cp -a /tmp/all_generated/static/images/. static/images/ 2>/dev/null || true
 
-      - name: Cache save
-        id: cache-save
-        uses: actions/cache/save@v5
-        with:
-          path: ${{ runner.temp }}/hugo_cache
-          key: ${{ steps.cache-restore.outputs.cache-primary-key }}
+      if [ -n "$(git status --porcelain -- content/post stock_cache static/images)" ]; then
+        git add content/post stock_cache static/images
+        git commit -m "🤖 AI 自动更新今日量化复盘报告 [skip ci]"
+        git push origin "HEAD:${GITHUB_REF_NAME}"
+      else
+        echo "没有检测到新文章、缓存或图片，跳过提交。"
+      fi
 
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v5
-        with:
-          path: ./public
+  # 7. 配置建站环境
+  - name: Setup Go
+    uses: actions/setup-go@v6
+    with:
+      go-version: ${{ env.GO_VERSION }}
+      cache: false
 
-  # 9. 最终发布到 GitHub Pages
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build_and_deploy
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5
+  - name: Setup Node.js
+    uses: actions/setup-node@v6
+    with:
+      node-version: ${{ env.NODE_VERSION }}
+
+  - name: Setup Pages
+    id: pages
+    uses: actions/configure-pages@v6
+
+  - name: Install Dart Sass
+    run: |
+      mkdir -p "${HOME}/.local"
+      curl -sLJO "https://github.com/sass/dart-sass/releases/download/${DART_SASS_VERSION}/dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
+      tar -C "${HOME}/.local" -xf "dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
+      rm "dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
+      echo "${HOME}/.local/dart-sass" >> "${GITHUB_PATH}"
+
+  - name: Setup Hugo
+    uses: peaceiris/actions-hugo@v3
+    with:
+      hugo-version: 'latest'
+      extended: true
+
+  - name: Install Node.js dependencies
+    run: |
+      [[ -f package-lock.json || -f npm-shrinkwrap.json ]] && npm ci || true
+
+  # 8. Hugo 构建网页
+  - name: Cache restore
+    id: cache-restore
+    uses: actions/cache/restore@v5
+    with:
+      path: ${{ runner.temp }}/hugo_cache
+      key: hugo-${{ github.run_id }}
+      restore-keys: hugo-
+
+  - name: Build the site
+    run: |
+      hugo \
+        --gc \
+        --minify \
+        --baseURL "${{ steps.pages.outputs.base_url }}/" \
+        --cacheDir "${{ runner.temp }}/hugo_cache"
+
+  - name: Cache save
+    id: cache-save
+    uses: actions/cache/save@v5
+    with:
+      path: ${{ runner.temp }}/hugo_cache
+      key: ${{ steps.cache-restore.outputs.cache-primary-key }}
+
+  - name: Upload artifact
+    uses: actions/upload-pages-artifact@v5
+    with:
+      path: ./public
+```
+
+# 9. 发布到 GitHub Pages
+
+deploy:
+environment:
+name: github-pages
+url: ${{ steps.deployment.outputs.page_url }}
+runs-on: ubuntu-latest
+needs: build_and_deploy
+steps:
+- name: Deploy to GitHub Pages
+id: deployment
+uses: actions/deploy-pages@v5
