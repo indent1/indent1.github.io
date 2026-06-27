@@ -69,6 +69,9 @@ jobs:
           echo "2. Running highest.py..."
           python highest.py || echo "highest.py failed"
 
+          echo "3. Running meigu_web1.py..."
+          python meigu_web1.py || echo "meigu_web1.py failed"
+
       # 5. 配置机器人的 Git 账号
       - name: Configure Git
         run: |
